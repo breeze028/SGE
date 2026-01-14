@@ -330,6 +330,10 @@ public class StochasticOptimizer : MonoBehaviour
 			sortedPrimitiveIDBuffer.Release();
 		if (sortedValidPrimitiveIDBuffer != null)
 			sortedValidPrimitiveIDBuffer.Release();
+		if (targetFrameBuffer != null)
+			targetFrameBuffer.Release();
+		if (argsResampling != null)
+			argsResampling.Release();
 	}
 
 	void OnRenderObject()
