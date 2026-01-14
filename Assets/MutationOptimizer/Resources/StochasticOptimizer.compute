@@ -1,0 +1,291 @@
+﻿#pragma kernel Reset
+#pragma kernel RandomPerturbation
+#pragma kernel GradientEstimation
+#pragma kernel GradientEstimationPost
+#pragma kernel GradientDescent
+
+// Optimizer parameters
+int _PrimitiveCount;
+int _OutputWidth;
+int _OutputHeight;
+int _ViewsPerOptimStep;
+int _OptimizerMode;
+int _LossMode;
+float _DoAlphaLoss;
+float _OptimizerBeta1;
+float _OptimizerBeta2;
+float _LearningRatePosition;
+float _LearningRateColor;
+
+// Scene data + scene gradients
+struct PrimitiveData
+{
+	float3 positions[3];
+	float3 color;
+};
+RWStructuredBuffer<PrimitiveData> _PrimitiveBuffer;
+RWStructuredBuffer<PrimitiveData> _PrimitiveBufferMutated;
+RWStructuredBuffer<int> _PrimitiveMutationError;
+RWStructuredBuffer<PrimitiveData> _PrimitiveGradientsOptimStep;
+RWStructuredBuffer<PrimitiveData> _PrimitiveGradientsMoments1;
+RWStructuredBuffer<PrimitiveData> _PrimitiveGradientsMoments2;
+RWStructuredBuffer<int> _PrimitiveOptimStepCounter;
+
+// Render buffers
+RWTexture2D<float4> _DepthIDBufferRW;
+RWTexture2D<float4> _ResolvedFrameRW;
+Texture2D<float4> _IDBufferMutatedMinus;
+Texture2D<float4> _IDBufferMutatedPlus;
+Texture2D<float4> _ResolvedFrameMutatedMinus;
+Texture2D<float4> _ResolvedFrameMutatedPlus;
+Texture2D<float4> _TargetTexture;
+SamplerState _LinearClampSampler;
+
+// Misc
+int _Dispatch1DOffset;
+int _CurrentView;
+int _CurrentOptimStep;
+float _IsAntitheticMutation;
+
+// Helpers
+uint WangHash(uint seed)
+{
+	// Actually PCG Hash
+	uint state = seed * 747796405u + 2891336453u;
+	uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+	return (word >> 22u) ^ word;
+}
+
+uint RandXorshift(inout uint rngState)
+{
+	// Actually PCG Hash
+	uint state = rngState;
+	rngState = rngState * 747796405u + 2891336453u;
+	uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+	return (word >> 22u) ^ word;
+}
+
+float GetRandomFloat(inout uint rngState)
+{
+	// -1/+1 mutations
+	uint rand = RandXorshift(rngState);
+	float res = float(rand) * (1.0 / 4294967296.0);
+	return res > 0.5 ? 1.0 : -1.0;
+
+	// Gaussian mutations
+	/*RandXorshift(rngState);
+	float res = float(rngState) * (1.0 / 4294967296.0);
+	return SampleNormalDistribution(res, 0.0, 1.0);*/
+
+	// Uniform mutations
+	/*RandXorshift(rngState);
+	float res = float(rngState) * (1.0 / 4294967296.0);
+	return res * 2.0 - 1.0;*/
+}
+
+PrimitiveData ZeroInitPrimitiveData()
+{
+	PrimitiveData primitiveData;
+	primitiveData.positions[0] = float3(0, 0, 0);
+	primitiveData.positions[1] = float3(0, 0, 0);
+	primitiveData.positions[2] = float3(0, 0, 0);
+	primitiveData.color = float3(0, 0, 0);
+	return primitiveData;
+}
+
+
+
+
+// Kernels
+[numthreads(256, 1, 1)]
+void Reset(uint3 id : SV_DispatchThreadID)
+{
+	uint threadID = id.x + _Dispatch1DOffset;
+	if (threadID >= _PrimitiveCount)
+		return;
+
+	// Reset primitive gradients
+	_PrimitiveGradientsOptimStep[threadID] = ZeroInitPrimitiveData();
+
+	// Reset primitive error
+	_PrimitiveMutationError[threadID] = 0;
+}
+
+[numthreads(256, 1, 1)]
+void RandomPerturbation(uint3 id : SV_DispatchThreadID)
+{
+	uint threadID = id.x + _Dispatch1DOffset;
+	if (threadID >= _PrimitiveCount)
+		return;
+
+	uint rngState = WangHash((_CurrentView * _PrimitiveCount) + threadID);
+
+	// Get current primitive data
+	PrimitiveData primitiveData = _PrimitiveBuffer[threadID];
+
+	// Create position mutation
+	for (int i = 0; i < 3; i++)
+	{
+		float3 randomMutation = float3(GetRandomFloat(rngState), GetRandomFloat(rngState), GetRandomFloat(rngState)) * (_IsAntitheticMutation > 0.5 ? -1.0 : 1.0);
+		randomMutation *= _LearningRatePosition; // TODO : we use the learning rate as a mutation amplitude here but should be a separate parameter
+		primitiveData.positions[i] += randomMutation;
+	}
+
+	// Create color mutation
+	float3 colorRandomMutation = float3(GetRandomFloat(rngState), GetRandomFloat(rngState), GetRandomFloat(rngState)) * (_IsAntitheticMutation > 0.5 ? -1.0 : 1.0);
+	colorRandomMutation *= _LearningRateColor;
+	primitiveData.color += colorRandomMutation;
+
+	// Clamp colors after mutation
+	primitiveData.color = clamp(primitiveData.color, 0.0, 1.0);
+
+	// Store mutated primitive for rendering
+	_PrimitiveBufferMutated[threadID] = primitiveData;
+}
+
+[numthreads(16, 16, 1)]
+void GradientEstimation(uint3 threadID : SV_DispatchThreadID)
+{
+	if (threadID.x >= _OutputWidth || threadID.y >= _OutputHeight)
+		return;
+
+	// Fetch target color
+	uint2 pixelCoord = threadID.xy;
+	float2 pixelUV = (pixelCoord + 0.5) / float2(_OutputWidth, _OutputHeight);
+	float4 targetColor = _TargetTexture.SampleLevel(_LinearClampSampler, pixelUV, 0);
+	targetColor.rgb = pow(targetColor.rgb, 1.0 / 2.2) * targetColor.a;
+
+	// Fetch mutated results (minus and plus antithetic mutations)
+	float4 colorRenderMinus = _ResolvedFrameMutatedMinus.SampleLevel(_LinearClampSampler, pixelUV, 0).rgba;
+	float4 colorRenderPlus = _ResolvedFrameMutatedPlus.SampleLevel(_LinearClampSampler, pixelUV, 0).rgba;
+	colorRenderMinus.rgb = pow(colorRenderMinus.rgb, 1.0 / 2.2) * colorRenderMinus.a;
+	colorRenderPlus.rgb = pow(colorRenderPlus.rgb, 1.0 / 2.2) * colorRenderPlus.a;
+
+	// Compute losses
+	float4 lossMinusRGBA = pow(abs(targetColor - colorRenderMinus), _LossMode == 1 ? 2.0 : 1.0);
+	float4 lossPlusRGBA = pow(abs(targetColor - colorRenderPlus), _LossMode == 1 ? 2.0 : 1.0);
+	float lossMinus = lossMinusRGBA.x + lossMinusRGBA.y + lossMinusRGBA.z + lossMinusRGBA.a * _DoAlphaLoss * 1;
+	float lossPlus = lossPlusRGBA.x + lossPlusRGBA.y + lossPlusRGBA.z + lossPlusRGBA.a * _DoAlphaLoss * 1;
+
+	// Loss difference
+	float lossDiffFloat = lossMinus - lossPlus;
+
+	// Quantize loss difference to integer for atomicAdd (floating point atomics not available in Unity)
+	int lossDiff = lossDiffFloat * 65536;
+	if (lossDiff == 0)
+		return;
+
+	// Accumulate loss for all primitives that contributed using both ID buffers, but avoid doing accumulating for same ID twice
+	float4 idBufferFetch = _IDBufferMutatedPlus[pixelCoord];
+	int primitiveIDPlus = asuint(idBufferFetch.r);
+	if (primitiveIDPlus < _PrimitiveCount)
+		InterlockedAdd(_PrimitiveMutationError[primitiveIDPlus].x, lossDiff);
+
+	idBufferFetch = _IDBufferMutatedMinus[pixelCoord];
+	int primitiveIDMinus = asuint(idBufferFetch.r);
+	if (primitiveIDMinus < _PrimitiveCount && primitiveIDMinus != primitiveIDPlus)
+		InterlockedAdd(_PrimitiveMutationError[primitiveIDMinus].x, lossDiff);
+}
+
+[numthreads(256, 1, 1)]
+void GradientEstimationPost(uint3 id : SV_DispatchThreadID)
+{
+	uint threadID = id.x + _Dispatch1DOffset;
+	if (threadID >= _PrimitiveCount)
+		return;
+	uint primitiveID = threadID;
+
+	// Fetch Primitive loss
+	float lossDiff = _PrimitiveMutationError[primitiveID].x;
+
+	// Get data
+	PrimitiveData primitiveData = _PrimitiveBuffer[primitiveID];
+	PrimitiveData primitiveDataMutated = _PrimitiveBufferMutated[primitiveID];
+	PrimitiveData mutationGradients = _PrimitiveGradientsOptimStep[primitiveID];
+
+	// Accumulate position gradients
+	for (int i = 0; i < 3; i++)
+	{
+		float3 mutation = primitiveDataMutated.positions[i] - primitiveData.positions[i];
+		mutationGradients.positions[i] += mutation * lossDiff / 2.0;
+	}
+
+	// Accumulate color gradients
+	float3 colorMutation = primitiveDataMutated.color - primitiveData.color;
+	mutationGradients.color += colorMutation * lossDiff / 2.0;
+
+	// Store result
+	_PrimitiveGradientsOptimStep[primitiveID] = mutationGradients;
+
+	// Reset Primitive loss
+	_PrimitiveMutationError[threadID] = 0;
+}
+
+[numthreads(256, 1, 1)]
+void GradientDescent(uint3 id : SV_DispatchThreadID)
+{
+	uint threadID = id.x + _Dispatch1DOffset;
+	if (threadID >= _PrimitiveCount)
+		return;
+
+	// Get data
+	uint primitiveID = threadID;
+	PrimitiveData primitiveData = _PrimitiveBuffer[primitiveID];
+	PrimitiveData mutationGradients = _PrimitiveGradientsOptimStep[primitiveID];
+	PrimitiveData gradientMoments1 = _PrimitiveGradientsMoments1[primitiveID];
+	PrimitiveData gradientMoments2 = _PrimitiveGradientsMoments2[primitiveID];
+
+	// Apply gradient descent
+	if (_OptimizerMode == 0) // RMS PROP
+	{
+		if (_CurrentOptimStep == 0)
+			return;
+
+		// Descend position gradients
+		for (int i = 0; i < 3; i++)
+		{
+			float3 gradient = mutationGradients.positions[i];
+			gradientMoments1.positions[i] = _OptimizerBeta1 * gradientMoments1.positions[i] + (1.0 - _OptimizerBeta1) * (gradient * gradient);
+			primitiveData.positions[i] += _LearningRatePosition * (gradient / (sqrt(gradientMoments1.positions[i]) + 1e-7));
+		}
+
+		// Descend color gradients
+		float3 colorGradient = mutationGradients.color;
+		gradientMoments1.color = _OptimizerBeta1 * gradientMoments1.color + (1.0 - _OptimizerBeta1) * (colorGradient * colorGradient);
+		primitiveData.color += _LearningRateColor * (colorGradient / (sqrt(gradientMoments1.color) + 1e-7));
+	}
+	else // ADAM
+	{
+		int primitiveOptimStep = _PrimitiveOptimStepCounter[primitiveID];
+
+		// Descend position gradients
+		for (int i = 0; i < 3; i++)
+		{
+			float3 gradient = mutationGradients.positions[i];
+			gradientMoments1.positions[i] = _OptimizerBeta1 * gradientMoments1.positions[i] + (1.0 - _OptimizerBeta1) * gradient;
+			gradientMoments2.positions[i] = _OptimizerBeta2 * gradientMoments2.positions[i] + (1.0 - _OptimizerBeta2) * (gradient * gradient);
+			float3 moment1BiasCorrected = gradientMoments1.positions[i] / (1.0 - pow(_OptimizerBeta1, primitiveOptimStep + 1));
+			float3 moment2BiasCorrected = gradientMoments2.positions[i] / (1.0 - pow(_OptimizerBeta2, primitiveOptimStep + 1));
+			primitiveData.positions[i] += _LearningRatePosition * (moment1BiasCorrected / (sqrt(moment2BiasCorrected) + 1e-7));
+		}
+
+		// Descend color gradients
+		float3 colorGradient = mutationGradients.color;
+		gradientMoments1.color = _OptimizerBeta1 * gradientMoments1.color + (1.0 - _OptimizerBeta1) * colorGradient;
+		gradientMoments2.color = _OptimizerBeta2 * gradientMoments2.color + (1.0 - _OptimizerBeta2) * (colorGradient * colorGradient);
+		float3 colorMoment1BiasCorrected = gradientMoments1.color / (1.0 - pow(_OptimizerBeta1, primitiveOptimStep + 1));
+		float3 colorMoment2BiasCorrected = gradientMoments2.color / (1.0 - pow(_OptimizerBeta2, primitiveOptimStep + 1));
+		primitiveData.color += _LearningRateColor * (colorMoment1BiasCorrected / (sqrt(colorMoment2BiasCorrected) + 1e-7));
+
+		// Update per-primitive step counter
+		_PrimitiveOptimStepCounter[primitiveID] = primitiveOptimStep + 1;
+	}
+
+	// Clamp colors after gradient descent
+	primitiveData.color = clamp(primitiveData.color, 0.0, 1.0);
+
+	// Write results
+	_PrimitiveBuffer[primitiveID] = primitiveData;
+	_PrimitiveGradientsMoments1[primitiveID] = gradientMoments1;
+	_PrimitiveGradientsMoments2[primitiveID] = gradientMoments2;
+}

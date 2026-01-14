@@ -1,0 +1,276 @@
+#pragma kernel ResetVisibilityCounter
+#pragma kernel DecrementVisibilityCounter
+#pragma kernel ResetSeenPrimitivesVisibilityCounter
+#pragma kernel ListValidAndInvalidPrimitiveIDs
+#pragma kernel InitArgsResampling
+#pragma kernel InitBitonicSortValidPrimitives
+#pragma kernel BitonicSortValidPrimitives
+#pragma kernel PairResampling
+
+// Scene data + scene gradients
+int _OutputWidth;
+int _OutputHeight;
+int _PrimitiveCount;
+struct PrimitiveData
+{
+	float3 positions[3];
+	float3 color;
+};
+RWStructuredBuffer<PrimitiveData> _PrimitiveBuffer;
+RWStructuredBuffer<PrimitiveData> _PrimitiveGradientsMoments1;
+RWStructuredBuffer<PrimitiveData> _PrimitiveGradientsMoments2;
+RWStructuredBuffer<int> _PrimitiveOptimStepCounter;
+
+// Triangle resampling
+int _FramesUnseenBeforeKill;
+float _MinPrimitiveWorldArea;
+Texture2D<float4> _IDBuffer;
+RWStructuredBuffer<int> _PrimitiveKillCounters;
+AppendStructuredBuffer<uint> _AppendValidPrimitiveIDs;
+AppendStructuredBuffer<uint> _AppendInvalidPrimitiveIDs;
+RWStructuredBuffer<uint2> _SortedValidPrimitiveIDs;
+int _PrimitiveCountPow2;
+int _SortLoopValueX;
+int _SortLoopValueY;
+StructuredBuffer<uint> _ReadValidPrimitiveIDs;
+StructuredBuffer<uint> _ReadInvalidPrimitiveIDs;
+RWStructuredBuffer<uint> _ArgsValidPrimitiveIDs;
+RWStructuredBuffer<uint> _ArgsInvalidPrimitiveIDs;
+RWStructuredBuffer<uint> _ArgsResampling;
+
+// Misc
+int _Dispatch1DOffset;
+
+float Unsigned3DTriangleArea(float3 A, float3 B, float3 C)
+{
+	return length(cross(B - A, C - A));
+}
+
+PrimitiveData ZeroInitPrimitiveData()
+{
+	PrimitiveData primitiveData;
+	primitiveData.positions[0] = float3(0, 0, 0);
+	primitiveData.positions[1] = float3(0, 0, 0);
+	primitiveData.positions[2] = float3(0, 0, 0);
+	primitiveData.color = float3(0, 0, 0);
+	return primitiveData;
+}
+
+
+
+
+[numthreads(256, 1, 1)]
+void ResetVisibilityCounter(uint3 id : SV_DispatchThreadID)
+{
+	uint threadID = id.x + _Dispatch1DOffset;
+	if (threadID >= _PrimitiveCount)
+		return;
+	_PrimitiveKillCounters[threadID] = _FramesUnseenBeforeKill;
+}
+
+[numthreads(256, 1, 1)]
+void DecrementVisibilityCounter(uint3 id : SV_DispatchThreadID)
+{
+	uint threadID = id.x + _Dispatch1DOffset;
+	if (threadID >= _PrimitiveCount)
+		return;
+
+	int currentCounter = _PrimitiveKillCounters[threadID];
+	if (currentCounter > 0)
+		_PrimitiveKillCounters[threadID] = currentCounter - 1;
+}
+
+[numthreads(16, 16, 1)]
+void ResetSeenPrimitivesVisibilityCounter(uint3 threadID : SV_DispatchThreadID)
+{
+	if (threadID.x >= _OutputWidth || threadID.y >= _OutputHeight)
+		return;
+
+	uint2 pixelCoord = threadID.xy;
+	int primitiveID = asuint(_IDBuffer[pixelCoord]);
+	if (primitiveID < _PrimitiveCount)
+		_PrimitiveKillCounters[primitiveID] = _FramesUnseenBeforeKill;
+}
+
+[numthreads(256, 1, 1)]
+void ListValidAndInvalidPrimitiveIDs(uint3 id : SV_DispatchThreadID)
+{
+	uint threadID = id.x + _Dispatch1DOffset;
+	if (threadID >= _PrimitiveCount)
+		return;
+	uint primitiveID = threadID;
+
+	PrimitiveData primitiveData = _PrimitiveBuffer[primitiveID];
+	float primitiveArea = Unsigned3DTriangleArea(primitiveData.positions[0], primitiveData.positions[1], primitiveData.positions[2]);
+
+	// Take into account size
+	bool isValid = primitiveArea > _MinPrimitiveWorldArea;
+
+	// Take into account visibility
+	isValid = isValid && _PrimitiveKillCounters[primitiveID] > 0;
+
+	if (isValid == true)
+	{
+		// Primitive to subdivide must be at least twice larger than minimum area
+		if (primitiveArea >= _MinPrimitiveWorldArea * 3.0)
+			_AppendValidPrimitiveIDs.Append(primitiveID);
+	}
+	else
+	{
+		_AppendInvalidPrimitiveIDs.Append(primitiveID);
+	}
+}
+
+[numthreads(1, 1, 1)]
+void InitArgsResampling(uint3 id : SV_DispatchThreadID)
+{
+	uint validCount = _ArgsValidPrimitiveIDs[0];
+	uint invalidCount = _ArgsInvalidPrimitiveIDs[0];
+	uint threadCount = min(validCount, invalidCount);
+
+	int threadGroupCount = (int)ceil(threadCount / 256.0);
+	if (threadGroupCount < 65536)
+	{
+		_ArgsResampling[0] = threadGroupCount;
+		_ArgsResampling[1] = 1;
+		_ArgsResampling[2] = 1;
+		_ArgsResampling[3] = threadCount;
+	}
+	else
+	{
+		int threadGroupCountDistributed = (int)ceil(pow(threadGroupCount, 1.0f / 2.0f));
+		_ArgsResampling[0] = threadGroupCountDistributed;
+		_ArgsResampling[1] = threadGroupCountDistributed;
+		_ArgsResampling[2] = 1;
+		_ArgsResampling[3] = threadCount;
+	}
+}
+
+[numthreads(256, 1, 1)]
+void InitBitonicSortValidPrimitives(uint threadID : SV_DispatchThreadID)
+{
+	if (threadID >= _PrimitiveCountPow2)
+		return;
+
+	uint validCount = _ArgsValidPrimitiveIDs[0];
+	uint2 sort;
+	if (threadID < validCount)
+	{
+		sort.x = _ReadValidPrimitiveIDs[threadID];
+
+		// Sort : biggest first
+		PrimitiveData primitiveData = _PrimitiveBuffer[sort.x];
+		sort.y = Unsigned3DTriangleArea(primitiveData.positions[0], primitiveData.positions[1], primitiveData.positions[2]) * 65536;
+
+		// Sort : most color gardient variance first
+		//PrimitiveData primitiveGradients = _PrimitiveGradientsMoments2[sort.x];
+		//float colorGradientVariance = primitiveGradients.color.r + primitiveGradients.color.g + primitiveGradients.color.b;
+		//sort.y = colorGradientVariance * 65536;
+
+		// Sort : random
+		//sort.y = WangHash((_CurrentOptimStep * _PrimitiveCount) + sort.x);
+	}
+	else
+	{
+		sort.x = 4294967295;
+		sort.y = 0;
+	}
+	_SortedValidPrimitiveIDs[threadID.x] = sort;
+}
+
+[numthreads(256, 1, 1)]
+void BitonicSortValidPrimitives(uint threadID : SV_DispatchThreadID)
+{
+	if (threadID >= _PrimitiveCountPow2 / 2)
+		return;
+
+	uint d1 = _SortLoopValueX;
+	uint d2 = _SortLoopValueY;
+	uint mask = 0xFFFFFFFEu * d1;
+	uint i1 = ((threadID << 1) & mask) | (threadID & ~(mask >> 1));
+	uint i2 = i1 | d1;
+
+	uint2 gaussian1 = _SortedValidPrimitiveIDs[i1];
+	uint2 gaussian2 = _SortedValidPrimitiveIDs[i2];
+	uint2 minValue = gaussian1.y >= gaussian2.y ? gaussian1 : gaussian2;
+	uint2 maxValue = gaussian1.y >= gaussian2.y ? gaussian2 : gaussian1;
+
+	if ((threadID & d2) == 0u)
+	{
+		_SortedValidPrimitiveIDs[i1] = minValue;
+		_SortedValidPrimitiveIDs[i2] = maxValue;
+	}
+	else
+	{
+		_SortedValidPrimitiveIDs[i1] = maxValue;
+		_SortedValidPrimitiveIDs[i2] = minValue;
+	}
+}
+
+[numthreads(256, 1, 1)]
+void PairResampling(uint3 id : SV_DispatchThreadID)
+{
+	uint dispatchDistributer = _ArgsResampling[0];
+	uint threadID = id.x + id.y * dispatchDistributer * 256;
+	if (threadID >= _ArgsResampling[3])
+		return;
+
+	// Get current resampling pair (subdivide triangle1 by re-using triangle0)
+	uint primitiveID0 = _ReadInvalidPrimitiveIDs[threadID];
+	uint primitiveID1 = _SortedValidPrimitiveIDs[threadID].x;
+	if (primitiveID1 >= _PrimitiveCount)
+		return;
+	PrimitiveData primitive0 = _PrimitiveBuffer[primitiveID0];
+	PrimitiveData primitive1 = _PrimitiveBuffer[primitiveID1];
+
+	// Longest edge bisection
+	float lengthA = length(primitive1.positions[1] - primitive1.positions[0]);
+	float lengthB = length(primitive1.positions[2] - primitive1.positions[1]);
+	float lengthC = length(primitive1.positions[0] - primitive1.positions[2]);
+	uint idBase, idLeft, idRight;
+	if (lengthA > lengthB && lengthA > lengthC)
+	{
+		idBase = 2;
+		idLeft = 0;
+		idRight = 1;
+	}
+	else if (lengthB > lengthA && lengthB > lengthC)
+	{
+		idBase = 0;
+		idLeft = 1;
+		idRight = 2;
+	}
+	else
+	{
+		idBase = 1;
+		idLeft = 2;
+		idRight = 0;
+	}
+
+	// Handle kill counters
+	_PrimitiveKillCounters[primitiveID0] = _FramesUnseenBeforeKill;
+	_PrimitiveKillCounters[primitiveID1] = _FramesUnseenBeforeKill;
+
+	// GEOMETRY
+	float3 newVertex = (primitive1.positions[idLeft] + primitive1.positions[idRight]) / 2.0;
+	_PrimitiveBuffer[primitiveID0].positions[0] = primitive1.positions[idBase];
+	_PrimitiveBuffer[primitiveID0].positions[1] = primitive1.positions[idLeft];
+	_PrimitiveBuffer[primitiveID0].positions[2] = newVertex;
+	_PrimitiveBuffer[primitiveID1].positions[0] = primitive1.positions[idBase];
+	_PrimitiveBuffer[primitiveID1].positions[1] = newVertex;
+	_PrimitiveBuffer[primitiveID1].positions[2] = primitive1.positions[idRight];
+
+	// COLOR
+	_PrimitiveBuffer[primitiveID0].color = primitive1.color;
+	_PrimitiveBuffer[primitiveID1].color = primitive1.color;
+
+	// Reset all gradients
+	PrimitiveData zeroInit = ZeroInitPrimitiveData();
+
+	_PrimitiveGradientsMoments1[primitiveID0] = zeroInit;
+	_PrimitiveGradientsMoments1[primitiveID1] = zeroInit;
+	_PrimitiveGradientsMoments2[primitiveID0] = zeroInit;
+	_PrimitiveGradientsMoments2[primitiveID1] = zeroInit;
+	_PrimitiveOptimStepCounter[primitiveID0] = 0;
+	_PrimitiveOptimStepCounter[primitiveID1] = 0;
+}
