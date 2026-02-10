@@ -9,6 +9,7 @@ using Unity.Mathematics;
 public class StochasticOptimizerEditor : Editor
 {
 	SerializedProperty targetResolution;
+	SerializedProperty init3DMesh;
 	SerializedProperty target3DMesh;
 	SerializedProperty primitiveCount;
 	SerializedProperty primitiveInitSize;
@@ -27,6 +28,7 @@ public class StochasticOptimizerEditor : Editor
 	SerializedProperty doAlphaLoss;
 	SerializedProperty viewsPerOptimStep;
 	SerializedProperty optimizeColorsSeparately;
+	SerializedProperty lambdaLap;
 
 	SerializedProperty beta1;
 	SerializedProperty beta2;
@@ -44,6 +46,7 @@ public class StochasticOptimizerEditor : Editor
 	void OnEnable()
 	{
 		targetResolution = serializedObject.FindProperty("targetResolution");
+		init3DMesh = serializedObject.FindProperty("init3DMesh");
 		target3DMesh = serializedObject.FindProperty("target3DMesh");
 		primitiveCount = serializedObject.FindProperty("primitiveCount");
 		primitiveInitSize = serializedObject.FindProperty("primitiveInitSize");
@@ -62,6 +65,7 @@ public class StochasticOptimizerEditor : Editor
 		doAlphaLoss = serializedObject.FindProperty("doAlphaLoss");
 		viewsPerOptimStep = serializedObject.FindProperty("viewsPerOptimStep");
 		optimizeColorsSeparately = serializedObject.FindProperty("optimizeColorsSeparately");
+		lambdaLap = serializedObject.FindProperty("lambdaLap");
 
 		beta1 = serializedObject.FindProperty("beta1");
 		beta2 = serializedObject.FindProperty("beta2");
@@ -101,6 +105,7 @@ public class StochasticOptimizerEditor : Editor
 		// Scene settings
 		EditorGUILayout.LabelField("Scene Settings", EditorStyles.boldLabel);
 		EditorGUILayout.PropertyField(targetResolution);
+		EditorGUILayout.PropertyField(init3DMesh);
 		EditorGUILayout.PropertyField(target3DMesh);
 		EditorGUILayout.PropertyField(primitiveInitSeed);
 		EditorGUILayout.PropertyField(primitiveCount);
@@ -126,6 +131,7 @@ public class StochasticOptimizerEditor : Editor
 		EditorGUILayout.PropertyField(doAlphaLoss);
 		EditorGUILayout.PropertyField(viewsPerOptimStep);
 		EditorGUILayout.PropertyField(optimizeColorsSeparately);
+		EditorGUILayout.PropertyField(lambdaLap);
 
 		// Optimizer controls
 		EditorGUILayout.Space();
