@@ -302,6 +302,15 @@ public class StochasticOptimizer : MonoBehaviour
 		if (indexBuffer != null)
 			indexBuffer.Release();
 		indexBuffer = null;
+		if (AdjacencyBuffer != null)
+			AdjacencyBuffer.Release();
+		AdjacencyBuffer = null;
+		if (AdjacencyStartBuffer != null)
+			AdjacencyStartBuffer.Release();
+		AdjacencyStartBuffer = null;
+		if (AdjacencyCountBuffer != null)
+			AdjacencyCountBuffer.Release();
+		AdjacencyCountBuffer = null;
 		ReleaseOptimBuffers();
 	}
 
@@ -347,12 +356,6 @@ public class StochasticOptimizer : MonoBehaviour
 			targetFrameBuffer.Release();
 		if (argsResampling != null)
 			argsResampling.Release();
-		if (AdjacencyBuffer != null)
-			AdjacencyBuffer.Release();
-		if (AdjacencyStartBuffer != null)
-			AdjacencyStartBuffer.Release();
-		if (AdjacencyCountBuffer != null)
-			AdjacencyCountBuffer.Release();
 	}
 	
 	void OnRenderObject()
@@ -428,9 +431,9 @@ public class StochasticOptimizer : MonoBehaviour
 		// Accumulate gradients
 		stochasticOptimizerCS.SetFloat("_LambdaLap", lambdaLap);
 		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_IndexBuffer", indexBuffer);
-		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_AdjacencyBuffer", indexBuffer);
-		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_AdjacencyStartBuffer", indexBuffer);
-		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_AdjacencyCountBuffer", indexBuffer);
+		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_AdjacencyBuffer", AdjacencyBuffer);
+		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_AdjacencyStartBuffer", AdjacencyStartBuffer);
+		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_AdjacencyCountBuffer", AdjacencyCountBuffer);
 		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_PrimitiveBuffer", primitiveBuffer);
 		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_PrimitiveBufferMutated", primitiveBufferMutated);
 		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_PrimitiveMutationError", optimStepMutationError);
