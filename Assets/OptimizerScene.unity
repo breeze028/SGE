@@ -372,12 +372,9 @@ MonoBehaviour:
   targetFrameBuffer: {fileID: 0}
   currentOptimStep: 0
   targetResolution: {x: 1024, y: 1024}
-  init3DMesh: {fileID: 0}
-  target3DMesh: {fileID: 0}
+  init3DMesh: {fileID: 546714534}
+  target3DMesh: {fileID: 1877730785}
   primitiveCount: 25000
-  primitiveInitSize: 0.01
-  primitiveInitSeed: 0
-  initPrimitivesOnMeshSurface: 0
   randomViewZoomRange: {x: 1.5, y: 2}
   reset: 0
   pause: 1
@@ -394,10 +391,6 @@ MonoBehaviour:
   learningRatePosition: 0.0003
   learningRateColor: 0.004
   lambdaLap: 64
-  doPrimitiveResampling: 0
-  resamplingInterval: 16
-  optimStepsUnseenBeforeKill: 2
-  minPrimitiveWorldArea: 0.0001
   millisecondsPerOptimStep: 0
   totalElapsedSeconds: 0
 --- !u!4 &358831154
@@ -1542,6 +1535,11 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!1 &1877730785 stripped
+GameObject:
+  m_CorrespondingSourceObject: {fileID: 919132149155446097, guid: a7fcaafb1abd10145bb57a4f729343c3, type: 3}
+  m_PrefabInstance: {fileID: 1385928521}
+  m_PrefabAsset: {fileID: 0}
 --- !u!4 &1151388027802324251
 Transform:
   m_ObjectHideFlags: 0
