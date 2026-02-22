@@ -2,6 +2,8 @@
 #pragma kernel RandomPerturbation
 #pragma kernel GradientEstimation
 #pragma kernel GradientEstimationPost
+#pragma kernel InitJacobiGradient
+#pragma kernel GradientPrecondition
 #pragma kernel GradientDescent
 
 // Optimizer parameters
@@ -18,6 +20,7 @@ float _OptimizerBeta2;
 float _LearningRatePosition;
 float _LearningRateColor;
 float _LambdaLap;
+float _Alpha;
 
 // Scene data + scene gradients
 StructuredBuffer<int> _IndexBuffer;
@@ -28,6 +31,8 @@ RWStructuredBuffer<float3> _PrimitiveBuffer;
 RWStructuredBuffer<float3> _PrimitiveBufferMutated;
 RWStructuredBuffer<int> _PrimitiveMutationError;
 RWStructuredBuffer<int3> _PrimitiveGradientsOptimStep;
+RWStructuredBuffer<int3> _JacobiGradientsIn;
+RWStructuredBuffer<int3> _JacobiGradientsOut;
 RWStructuredBuffer<float3> _PrimitiveGradientsMoments1;
 RWStructuredBuffer<float3> _PrimitiveGradientsMoments2;
 RWStructuredBuffer<int> _PrimitiveOptimStepCounter;
@@ -186,32 +191,32 @@ void GradientEstimationPost(uint3 id : SV_DispatchThreadID)
 	
 	if (threadID < _VertexCount)
 	{
-		uint vertexID = threadID;
-		float3 vertexPosition = _PrimitiveBuffer[vertexID];
-		// float3 vertexPositionMutationGradients = _PrimitiveGradientsOptimStep[vertexID];
-		// vertexPositionMutationGradients /= 65536;
-		float3 vertexPositionMutationGradients = 0;
-		
-		int adjacencyVertexStart = _AdjacencyStartBuffer[vertexID];
-		int adjacencyVertexCount = _AdjacencyCountBuffer[vertexID];
-
-		float3 meanVertexPosition = 0;
-		for (int k = 0; k < adjacencyVertexCount; k++)
-		{
-			int adjacencyVertex = _AdjacencyBuffer[adjacencyVertexStart + k];
-			float3 adjacencyVertexPosition = _PrimitiveBuffer[adjacencyVertex];
-			meanVertexPosition += adjacencyVertexPosition;
-		}
-		meanVertexPosition /= adjacencyVertexCount;
-
-		//float3 lap = vertexPosition - meanVertexPosition;
-		float3 lap = meanVertexPosition - vertexPosition;
-		vertexPositionMutationGradients += 2.0 * _LambdaLap * lap;
-		
-		int3 vertexPositionMutationGradientsInt = vertexPositionMutationGradients * 65536;
-		InterlockedAdd(_PrimitiveGradientsOptimStep[vertexID].x, vertexPositionMutationGradientsInt.x);
-		InterlockedAdd(_PrimitiveGradientsOptimStep[vertexID].y, vertexPositionMutationGradientsInt.y);
-		InterlockedAdd(_PrimitiveGradientsOptimStep[vertexID].z, vertexPositionMutationGradientsInt.z);
+		// uint vertexID = threadID;
+		// float3 vertexPosition = _PrimitiveBuffer[vertexID];
+		// // float3 vertexPositionMutationGradients = _PrimitiveGradientsOptimStep[vertexID];
+		// // vertexPositionMutationGradients /= 65536;
+		// float3 vertexPositionMutationGradients = 0;
+		//
+		// int adjacencyVertexStart = _AdjacencyStartBuffer[vertexID];
+		// int adjacencyVertexCount = _AdjacencyCountBuffer[vertexID];
+		//
+		// float3 meanVertexPosition = 0;
+		// for (int k = 0; k < adjacencyVertexCount; k++)
+		// {
+		// 	int adjacencyVertex = _AdjacencyBuffer[adjacencyVertexStart + k];
+		// 	float3 adjacencyVertexPosition = _PrimitiveBuffer[adjacencyVertex];
+		// 	meanVertexPosition += adjacencyVertexPosition;
+		// }
+		// meanVertexPosition /= adjacencyVertexCount;
+		//
+		// //float3 lap = vertexPosition - meanVertexPosition;
+		// float3 lap = meanVertexPosition - vertexPosition;
+		// vertexPositionMutationGradients += 2.0 * _LambdaLap * lap;
+		//
+		// int3 vertexPositionMutationGradientsInt = vertexPositionMutationGradients * 65536;
+		// InterlockedAdd(_PrimitiveGradientsOptimStep[vertexID].x, vertexPositionMutationGradientsInt.x);
+		// InterlockedAdd(_PrimitiveGradientsOptimStep[vertexID].y, vertexPositionMutationGradientsInt.y);
+		// InterlockedAdd(_PrimitiveGradientsOptimStep[vertexID].z, vertexPositionMutationGradientsInt.z);
 	}
 	else
 	{
@@ -233,21 +238,6 @@ void GradientEstimationPost(uint3 id : SV_DispatchThreadID)
 
 			float3 mutation = vertexPositionMutated - vertexPosition;
 			vertexPositionMutationGradients += mutation * lossDiff / 2.0;
-
-			// int adjacencyVertexStart = _AdjacencyStartBuffer[vertexID];
-			// int adjacencyVertexCount = _AdjacencyCountBuffer[vertexID];
-			//
-			// float3 meanVertexPosition = 0;
-			// for (int k = 0; k < adjacencyVertexCount; k++)
-			// {
-			// 	int adjacencyVertex = _AdjacencyBuffer[adjacencyVertexStart + k];
-			// 	float3 adjacencyVertexPosition = _PrimitiveBuffer[adjacencyVertex];
-			// 	meanVertexPosition += adjacencyVertexPosition;
-			// }
-			// meanVertexPosition /= adjacencyVertexCount;
-			//
-			// float3 lap = vertexPosition - meanVertexPosition;
-			// vertexPositionMutationGradients += 2.0 * _LambdaLap * lap;
 		
 			int3 vertexPositionMutationGradientsInt = vertexPositionMutationGradients * 65536;
 			InterlockedAdd(_PrimitiveGradientsOptimStep[vertexID].x, vertexPositionMutationGradientsInt.x);
@@ -270,6 +260,55 @@ void GradientEstimationPost(uint3 id : SV_DispatchThreadID)
 		_PrimitiveMutationError[primitiveID] = 0;
 	}
 }
+
+[numthreads(256,1,1)]
+void InitJacobiGradient(uint3 id : SV_DispatchThreadID)
+{
+	uint v = id.x;
+	if (v >= _PrimitiveCount) return;
+
+	_JacobiGradientsIn[v] = _PrimitiveGradientsOptimStep[v];
+}
+
+// TODO: Some variables' names need changing.
+[numthreads(256,1,1)]
+void GradientPrecondition(uint3 id : SV_DispatchThreadID)
+{
+	uint v = id.x;
+	if (v >= _VertexCount) return;
+
+	float3 x_i = _JacobiGradientsIn[v];
+	x_i /= 65536;
+	float3 g_i = _PrimitiveGradientsOptimStep[v];
+	g_i /= 65536;
+
+	int start = _AdjacencyStartBuffer[v];
+	int count = _AdjacencyCountBuffer[v];
+
+	float3 sum = 0;
+
+	for (int k = 0; k < count; ++k)
+	{
+		uint j = _AdjacencyBuffer[start + k];
+		//sum += _JacobiGradientsIn[j] /= 65536.0f;
+		float3 s_j =  _JacobiGradientsIn[j];
+		s_j /= 65536;
+		sum += s_j;
+	}
+
+	// combinatorial Laplacian
+	float3 Lx = count * x_i - sum;
+
+	// Richardson / Jacobi update
+	float3 x_new =
+		(1.0 - _Alpha) * x_i
+		- _Alpha * _LambdaLap * Lx
+		+ _Alpha * g_i;
+
+	int3 x_new_int = x_new * 65536;
+	_JacobiGradientsOut[v] = x_new_int;
+}
+
 
 [numthreads(256, 1, 1)]
 void GradientDescent(uint3 id : SV_DispatchThreadID)
@@ -324,6 +363,8 @@ void GradientDescent(uint3 id : SV_DispatchThreadID)
 			gradientMoments2 = _OptimizerBeta2 * gradientMoments2 + (1.0 - _OptimizerBeta2) * (gradient * gradient);
 			float3 moment1BiasCorrected = gradientMoments1 / (1.0 - pow(_OptimizerBeta1, primitiveOptimStep + 1));
 			float3 moment2BiasCorrected = gradientMoments2 / (1.0 - pow(_OptimizerBeta2, primitiveOptimStep + 1));
+			// float gradientMoments2LInfinity = max(abs(gradientMoments2.x), max(abs(gradientMoments2.y), abs(gradientMoments2.z)));
+			// float moment2BiasCorrected = gradientMoments2LInfinity / (1.0 - pow(_OptimizerBeta2, primitiveOptimStep + 1));
 			primitiveData += _LearningRatePosition * (moment1BiasCorrected / (sqrt(moment2BiasCorrected) + 1e-7));
 		}
 		else
@@ -334,6 +375,8 @@ void GradientDescent(uint3 id : SV_DispatchThreadID)
 			gradientMoments2 = _OptimizerBeta2 * gradientMoments2 + (1.0 - _OptimizerBeta2) * (colorGradient * colorGradient);
 			float3 colorMoment1BiasCorrected = gradientMoments1 / (1.0 - pow(_OptimizerBeta1, primitiveOptimStep + 1));
 			float3 colorMoment2BiasCorrected = gradientMoments2 / (1.0 - pow(_OptimizerBeta2, primitiveOptimStep + 1));
+			// float gradientMoments2LInfinity = max(abs(gradientMoments2.x), max(abs(gradientMoments2.y), abs(gradientMoments2.z)));
+			// float3 colorMoment2BiasCorrected = gradientMoments2LInfinity / (1.0 - pow(_OptimizerBeta2, primitiveOptimStep + 1));
 			primitiveData += _LearningRateColor * (colorMoment1BiasCorrected / (sqrt(colorMoment2BiasCorrected) + 1e-7));
 
 			// Clamp colors after gradient descent

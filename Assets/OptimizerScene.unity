@@ -372,8 +372,8 @@ MonoBehaviour:
   targetFrameBuffer: {fileID: 0}
   currentOptimStep: 0
   targetResolution: {x: 1024, y: 1024}
-  init3DMesh: {fileID: 1303440589}
-  target3DMesh: {fileID: 8164078560115793440}
+  init3DMesh: {fileID: 0}
+  target3DMesh: {fileID: 0}
   primitiveCount: 25000
   primitiveInitSize: 0.01
   primitiveInitSeed: 0
@@ -388,12 +388,12 @@ MonoBehaviour:
   lossMode: 0
   doAlphaLoss: 1
   viewsPerOptimStep: 32
-  optimizeColorsSeparately: 1
+  optimizeColorsSeparately: 0
   beta1: 0.9
   beta2: 0.999
-  learningRatePosition: 0.00047
-  learningRateColor: 0.005
-  lambdaLap: 0.001
+  learningRatePosition: 0.0003
+  learningRateColor: 0.004
+  lambdaLap: 64
   doPrimitiveResampling: 0
   resamplingInterval: 16
   optimStepsUnseenBeforeKill: 2
@@ -1634,15 +1634,15 @@ SceneRoots:
   - {fileID: 358831154}
   - {fileID: 963194228}
   - {fileID: 965840384}
+  - {fileID: 1303440593}
   - {fileID: 1151388027802324251}
   - {fileID: 1877344013}
   - {fileID: 894491911}
   - {fileID: 546714538}
+  - {fileID: 1385928521}
   - {fileID: 676847753}
-  - {fileID: 1303440593}
+  - {fileID: 723873339}
   - {fileID: 1176660523}
+  - {fileID: 5620439}
   - {fileID: 83165980}
   - {fileID: 1196338882}
-  - {fileID: 1385928521}
-  - {fileID: 723873339}
-  - {fileID: 5620439}

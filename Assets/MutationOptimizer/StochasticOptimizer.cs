@@ -34,6 +34,8 @@ public class StochasticOptimizer : MonoBehaviour
 	private ComputeBuffer primitiveBuffer;
 	private ComputeBuffer primitiveBufferMutated;
 	private ComputeBuffer optimStepGradientsBuffer;
+	private ComputeBuffer jacobiGradientsInBuffer;
+	private ComputeBuffer jacobiGradientsOutBuffer;
 	private ComputeBuffer optimStepMutationError;
 	private ComputeBuffer gradientMoments1Buffer;
 	private ComputeBuffer gradientMoments2Buffer;
@@ -61,6 +63,8 @@ public class StochasticOptimizer : MonoBehaviour
 	private int kernelRandomPerturbation;
 	private int kernelGradientEstimation;
 	private int kernelGradientEstimationPost;
+	private int kernelInitJacobiGradient;
+	private int kernelGradientPrecondition;
 	private int kernelGradientDescent;
 
 	private int kernelResetVisibilityCounter;
@@ -127,6 +131,8 @@ public class StochasticOptimizer : MonoBehaviour
 		kernelRandomPerturbation = stochasticOptimizerCS.FindKernel("RandomPerturbation");
 		kernelGradientEstimation = stochasticOptimizerCS.FindKernel("GradientEstimation");
 		kernelGradientEstimationPost = stochasticOptimizerCS.FindKernel("GradientEstimationPost");
+		kernelInitJacobiGradient = stochasticOptimizerCS.FindKernel("InitJacobiGradient");
+		kernelGradientPrecondition = stochasticOptimizerCS.FindKernel("GradientPrecondition");
 		kernelGradientDescent = stochasticOptimizerCS.FindKernel("GradientDescent");
 
 		kernelResetVisibilityCounter = triangleResamplingCS.FindKernel("ResetVisibilityCounter");
@@ -330,6 +336,10 @@ public class StochasticOptimizer : MonoBehaviour
 			renderedFrameMutatedPlus.Release();
 		if (optimStepGradientsBuffer != null)
 			optimStepGradientsBuffer.Release();
+		if (jacobiGradientsInBuffer != null)
+			jacobiGradientsInBuffer.Release();
+		if (jacobiGradientsOutBuffer != null)
+			jacobiGradientsOutBuffer.Release();
 		if (optimStepMutationError != null)
 			optimStepMutationError.Release();
 		if (gradientMoments1Buffer != null)
@@ -439,6 +449,29 @@ public class StochasticOptimizer : MonoBehaviour
 		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_PrimitiveMutationError", optimStepMutationError);
 		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_PrimitiveGradientsOptimStep", optimStepGradientsBuffer);
 		DispatchCompute1D(stochasticOptimizerCS, kernelGradientEstimationPost, primitiveCount, 256);
+		
+		// Init ping-pong buffer
+		stochasticOptimizerCS.SetBuffer(kernelInitJacobiGradient, "_PrimitiveGradientsOptimStep", optimStepGradientsBuffer);
+		stochasticOptimizerCS.SetBuffer(kernelInitJacobiGradient, "_JacobiGradientsIn", jacobiGradientsInBuffer);
+		DispatchCompute1D(stochasticOptimizerCS, kernelInitJacobiGradient, primitiveCount, 256);
+		
+		// Gradient Precondition
+		stochasticOptimizerCS.SetFloat("_Alpha", 0.002f);
+		stochasticOptimizerCS.SetFloat("_LambdaLap", lambdaLap);
+		stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_PrimitiveGradientsOptimStep", optimStepGradientsBuffer);
+		stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_AdjacencyBuffer", AdjacencyBuffer);
+		stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_AdjacencyStartBuffer", AdjacencyStartBuffer);
+		stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_AdjacencyCountBuffer", AdjacencyCountBuffer);
+		for (int k = 0; k < 15; k++)
+		{
+			stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_JacobiGradientsIn", jacobiGradientsInBuffer);
+			stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_JacobiGradientsOut", jacobiGradientsOutBuffer);
+			DispatchCompute1D(stochasticOptimizerCS, kernelGradientPrecondition, vertexCount, 256);
+			
+			stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_JacobiGradientsIn", jacobiGradientsOutBuffer);
+			stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_JacobiGradientsOut", jacobiGradientsInBuffer);
+			DispatchCompute1D(stochasticOptimizerCS, kernelGradientPrecondition, vertexCount, 256);
+		}
 	}
 
 	public void DoGradientDescent()
@@ -446,7 +479,7 @@ public class StochasticOptimizer : MonoBehaviour
 		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveBuffer", primitiveBuffer);
 		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveGradientsMoments1", gradientMoments1Buffer);
 		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveGradientsMoments2", gradientMoments2Buffer);
-		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveGradientsOptimStep", optimStepGradientsBuffer);
+		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveGradientsOptimStep", jacobiGradientsInBuffer);
 		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveOptimStepCounter", optimStepCounterBuffer);
 		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveMutationError", optimStepMutationError);
 		DispatchCompute1D(stochasticOptimizerCS, kernelGradientDescent, primitiveBuffer.count, 256);
@@ -614,6 +647,8 @@ public class StochasticOptimizer : MonoBehaviour
 		// Optim buffers
 		int primitiveByteSize = 12;
 		optimStepGradientsBuffer = new ComputeBuffer(primitiveCount, sizeof(int) * 3);
+		jacobiGradientsInBuffer = new ComputeBuffer(primitiveCount, sizeof(int) * 3);
+		jacobiGradientsOutBuffer = new ComputeBuffer(primitiveCount, sizeof(int) * 3);
 		gradientMoments1Buffer = new ComputeBuffer(primitiveCount, primitiveByteSize);
 		gradientMoments2Buffer = new ComputeBuffer(primitiveCount, primitiveByteSize);
 		primitiveBufferMutated = new ComputeBuffer(primitiveCount, primitiveByteSize);
@@ -621,6 +656,8 @@ public class StochasticOptimizer : MonoBehaviour
 		optimStepCounterBuffer = new ComputeBuffer(primitiveCount, sizeof(int));
 		primitiveKillCounters = new ComputeBuffer(primitiveCount, sizeof(int));
 		ZeroInitBuffer(optimStepGradientsBuffer);
+		ZeroInitBuffer(jacobiGradientsInBuffer);
+		ZeroInitBuffer(jacobiGradientsOutBuffer);
 		ZeroInitBuffer(gradientMoments1Buffer);
 		ZeroInitBuffer(gradientMoments2Buffer);
 		ZeroInitBuffer(primitiveBufferMutated);
