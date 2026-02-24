@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 5634d44c17e37d94a9ae81481656b2a8
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 11400000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 139275
+  packageName: DebugGUI Graph
+  packageVersion: 2.0
+  assetPath: Assets/Plugins/DebugGUI/Resources/DebugGUISettings.asset
+  uploadId: 614885

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using DataStructures.ViliWonka.KDTree;
 #if UNITY_EDITOR
 using Unity.Burst;
 #endif
@@ -10,6 +11,8 @@ using Unity.Jobs;
 using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.Profiling;
+using Debug = UnityEngine.Debug;
 
 
 public class StochasticOptimizer : MonoBehaviour
@@ -87,7 +90,10 @@ public class StochasticOptimizer : MonoBehaviour
 	public float millisecondsPerOptimStep = 0.0f;
 	public float totalElapsedSeconds = 0.0f;
 	
-	
+	private float chamfer;
+	private Vector3[] verticesDst;
+	private KDTree verticesDstKDTree;
+	private KDQuery query;
 	
 
 	// =========================== UNITY ===========================
@@ -108,6 +114,15 @@ public class StochasticOptimizer : MonoBehaviour
 		kernelGradientPrecondition = stochasticOptimizerCS.FindKernel("GradientPrecondition");
 		kernelGradientDescent = stochasticOptimizerCS.FindKernel("GradientDescent");
 
+		DebugGUI.SetGraphProperties("chamfer", "chamfer", 0, 0.5f, 1, Color.red, true);
+		
+		verticesDst = target3DMesh.GetComponentInChildren<MeshFilter>().sharedMesh.vertices;
+		for (int i = 0; i < verticesDst.Length; i++)
+		{
+			verticesDst[i] = target3DMesh.transform.TransformPoint(verticesDst[i]);
+		}
+		verticesDstKDTree = new KDTree(verticesDst);
+		query =  new KDQuery();
 	}
 
 	void Update()
@@ -188,6 +203,12 @@ public class StochasticOptimizer : MonoBehaviour
 		// Apply accumulated gradient for this optim step
 		DoGradientDescent();
 		ResetOptimizationStep();
+		
+		Profiler.BeginSample("VisualizeLoss");
+		// Visualize loss
+		if (currentOptimStep % 50 == 0)
+			VisualizeLoss();
+		Profiler.EndSample();
 
 		// Metrics
 		currentOptimStep += 1;
@@ -421,7 +442,57 @@ public class StochasticOptimizer : MonoBehaviour
 		stochasticOptimizerCS.SetBuffer(kernelRandomPerturbation, "_PrimitiveBufferMutated", primitiveBufferMutated);
 		DispatchCompute1D(stochasticOptimizerCS, kernelRandomPerturbation, primitiveBuffer.count, 256);
 	}
+	
+	
+	
+	
+	// ======================= EVALUATION =======================
+	public void VisualizeLoss()
+	{
+		Vector3[] verticesSrc = new Vector3[vertexCount];
+		primitiveBuffer.GetData(verticesSrc, 0, 0, vertexCount);
+		KDTree verticesSrcKDTree = new KDTree(verticesSrc);
+		
+		// Compute distance
+		double sumSrcToDst = 0.0;
+		double sumDstToSrc = 0.0;
 
+		// ----- SRC -> DST -----
+		for (int i = 0; i < verticesSrc.Length; i++)
+		{
+			Vector3 a = verticesSrc[i];
+			
+			List<float> distances = new List<float>();
+			query.ClosestPoint(verticesDstKDTree, a,  null, distances);
+			float minDistSqr = distances[0];
+
+			float dist = Mathf.Sqrt(minDistSqr);
+
+			sumSrcToDst += dist;
+		}
+
+		// ----- DST -> SRC -----
+		for (int i = 0; i < verticesDst.Length; i++)
+		{
+			Vector3 b = verticesDst[i];
+			
+			List<float> distances = new List<float>();
+			query.ClosestPoint(verticesSrcKDTree, b,  null, distances);
+			float minDistSqr = distances[0];
+
+			float dist = Mathf.Sqrt(minDistSqr);
+
+			sumDstToSrc += dist;
+		}
+		
+		chamfer = (float)(
+			sumSrcToDst / verticesSrc.Length +
+			sumDstToSrc / verticesDst.Length
+		);
+		
+		DebugGUI.Graph("chamfer", chamfer);
+		Debug.Log("step: " + currentOptimStep + " chamfer: " + chamfer);
+	}
 
 
 

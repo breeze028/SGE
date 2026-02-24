@@ -1,0 +1,18 @@
+fileFormatVersion: 2
+guid: 7d0f580c0f21ccf449a9635d3dda2b98
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences: []
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 139275
+  packageName: DebugGUI Graph
+  packageVersion: 2.0
+  assetPath: Assets/Plugins/DebugGUI/Windows/LogWindow.cs
+  uploadId: 614885
