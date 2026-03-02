@@ -372,12 +372,12 @@ MonoBehaviour:
   targetFrameBuffer: {fileID: 0}
   currentOptimStep: 0
   targetResolution: {x: 1024, y: 1024}
-  init3DMesh: {fileID: 546714534}
-  target3DMesh: {fileID: 1877730785}
+  init3DMesh: {fileID: 676847749}
+  target3DMesh: {fileID: 1919704206}
   primitiveCount: 25000
   randomViewZoomRange: {x: 1.5, y: 2}
   reset: 0
-  pause: 1
+  pause: 0
   stepForward: 0
   displayMode: 0
   separateFreeViewCamera: 1
@@ -1535,10 +1535,10 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!1 &1877730785 stripped
+--- !u!1 &1919704206 stripped
 GameObject:
-  m_CorrespondingSourceObject: {fileID: 919132149155446097, guid: a7fcaafb1abd10145bb57a4f729343c3, type: 3}
-  m_PrefabInstance: {fileID: 1385928521}
+  m_CorrespondingSourceObject: {fileID: 919132149155446097, guid: 8fd3b9baf20f3d44e9e51d52fc027391, type: 3}
+  m_PrefabInstance: {fileID: 723873339}
   m_PrefabAsset: {fileID: 0}
 --- !u!4 &1151388027802324251
 Transform:
