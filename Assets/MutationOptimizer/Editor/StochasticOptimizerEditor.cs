@@ -9,11 +9,8 @@ using Unity.Mathematics;
 public class StochasticOptimizerEditor : Editor
 {
 	SerializedProperty targetResolution;
+	SerializedProperty init3DMesh;
 	SerializedProperty target3DMesh;
-	SerializedProperty primitiveCount;
-	SerializedProperty primitiveInitSize;
-	SerializedProperty primitiveInitSeed;
-	SerializedProperty initPrimitivesOnMeshSurface;
 	SerializedProperty randomViewZoomRange;
 
 	SerializedProperty reset;
@@ -27,16 +24,12 @@ public class StochasticOptimizerEditor : Editor
 	SerializedProperty doAlphaLoss;
 	SerializedProperty viewsPerOptimStep;
 	SerializedProperty optimizeColorsSeparately;
+	SerializedProperty lambdaLap;
 
 	SerializedProperty beta1;
 	SerializedProperty beta2;
 	SerializedProperty learningRatePosition;
 	SerializedProperty learningRateColor;
-
-	SerializedProperty doPrimitiveResampling;
-	SerializedProperty resamplingInterval;
-	SerializedProperty optimStepsUnseenBeforeKill;
-	SerializedProperty minPrimitiveWorldArea;
 
 	SerializedProperty millisecondsPerOptimStep;
 	SerializedProperty totalElapsedSeconds;
@@ -44,11 +37,8 @@ public class StochasticOptimizerEditor : Editor
 	void OnEnable()
 	{
 		targetResolution = serializedObject.FindProperty("targetResolution");
+		init3DMesh = serializedObject.FindProperty("init3DMesh");
 		target3DMesh = serializedObject.FindProperty("target3DMesh");
-		primitiveCount = serializedObject.FindProperty("primitiveCount");
-		primitiveInitSize = serializedObject.FindProperty("primitiveInitSize");
-		primitiveInitSeed = serializedObject.FindProperty("primitiveInitSeed");
-		initPrimitivesOnMeshSurface = serializedObject.FindProperty("initPrimitivesOnMeshSurface");
 		randomViewZoomRange = serializedObject.FindProperty("randomViewZoomRange");
 
 		reset = serializedObject.FindProperty("reset");
@@ -62,16 +52,12 @@ public class StochasticOptimizerEditor : Editor
 		doAlphaLoss = serializedObject.FindProperty("doAlphaLoss");
 		viewsPerOptimStep = serializedObject.FindProperty("viewsPerOptimStep");
 		optimizeColorsSeparately = serializedObject.FindProperty("optimizeColorsSeparately");
+		lambdaLap = serializedObject.FindProperty("lambdaLap");
 
 		beta1 = serializedObject.FindProperty("beta1");
 		beta2 = serializedObject.FindProperty("beta2");
 		learningRatePosition = serializedObject.FindProperty("learningRatePosition");
 		learningRateColor = serializedObject.FindProperty("learningRateColor");
-
-		doPrimitiveResampling = serializedObject.FindProperty("doPrimitiveResampling");
-		resamplingInterval = serializedObject.FindProperty("resamplingInterval");
-		optimStepsUnseenBeforeKill = serializedObject.FindProperty("optimStepsUnseenBeforeKill");
-		minPrimitiveWorldArea = serializedObject.FindProperty("minPrimitiveWorldArea");
 
 		totalElapsedSeconds = serializedObject.FindProperty("totalElapsedSeconds");
 		millisecondsPerOptimStep = serializedObject.FindProperty("millisecondsPerOptimStep");
@@ -80,8 +66,6 @@ public class StochasticOptimizerEditor : Editor
 	public void ValidateParameters()
 	{
 		// Validate parameters
-		if (doPrimitiveResampling.boolValue == true)
-			primitiveCount.intValue = math.max(primitiveCount.intValue, 2);
 		viewsPerOptimStep.intValue = math.max(viewsPerOptimStep.intValue, 1);
 		targetResolution.vector2IntValue = new Vector2Int(math.max(targetResolution.vector2IntValue.x, 2), math.max(targetResolution.vector2IntValue.y, 2));
 	}
@@ -101,11 +85,8 @@ public class StochasticOptimizerEditor : Editor
 		// Scene settings
 		EditorGUILayout.LabelField("Scene Settings", EditorStyles.boldLabel);
 		EditorGUILayout.PropertyField(targetResolution);
+		EditorGUILayout.PropertyField(init3DMesh);
 		EditorGUILayout.PropertyField(target3DMesh);
-		EditorGUILayout.PropertyField(primitiveInitSeed);
-		EditorGUILayout.PropertyField(primitiveCount);
-		EditorGUILayout.PropertyField(primitiveInitSize);
-		EditorGUILayout.PropertyField(initPrimitivesOnMeshSurface);
 		EditorGUILayout.PropertyField(randomViewZoomRange);
 
 		// Controls
@@ -126,6 +107,7 @@ public class StochasticOptimizerEditor : Editor
 		EditorGUILayout.PropertyField(doAlphaLoss);
 		EditorGUILayout.PropertyField(viewsPerOptimStep);
 		EditorGUILayout.PropertyField(optimizeColorsSeparately);
+		EditorGUILayout.PropertyField(lambdaLap);
 
 		// Optimizer controls
 		EditorGUILayout.Space();
@@ -134,14 +116,6 @@ public class StochasticOptimizerEditor : Editor
 		EditorGUILayout.PropertyField(beta2);
 		EditorGUILayout.PropertyField(learningRatePosition);
 		EditorGUILayout.PropertyField(learningRateColor);
-
-		// Resampling settings
-		EditorGUILayout.Space();
-		EditorGUILayout.LabelField("Resampling Settings", EditorStyles.boldLabel);
-		EditorGUILayout.PropertyField(doPrimitiveResampling);
-		EditorGUILayout.PropertyField(resamplingInterval);
-		EditorGUILayout.PropertyField(optimStepsUnseenBeforeKill);
-		EditorGUILayout.PropertyField(minPrimitiveWorldArea);
 
 		ValidateParameters();
 

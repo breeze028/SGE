@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using DataStructures.ViliWonka.KDTree;
 #if UNITY_EDITOR
 using Unity.Burst;
 #endif
@@ -10,6 +11,8 @@ using Unity.Jobs;
 using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.Profiling;
+using Debug = UnityEngine.Debug;
 
 
 public class StochasticOptimizer : MonoBehaviour
@@ -26,21 +29,19 @@ public class StochasticOptimizer : MonoBehaviour
 	private Camera cameraOptim;
 	private ComputeShader stochasticOptimizerCS;
 	private ComputeShader triangleResamplingCS;
+	private ComputeBuffer indexBuffer;
+	private ComputeBuffer AdjacencyBuffer;
+	private ComputeBuffer AdjacencyStartBuffer;
+	private ComputeBuffer AdjacencyCountBuffer;
 	private ComputeBuffer primitiveBuffer;
 	private ComputeBuffer primitiveBufferMutated;
 	private ComputeBuffer optimStepGradientsBuffer;
+	private ComputeBuffer jacobiGradientsInBuffer;
+	private ComputeBuffer jacobiGradientsOutBuffer;
 	private ComputeBuffer optimStepMutationError;
 	private ComputeBuffer gradientMoments1Buffer;
 	private ComputeBuffer gradientMoments2Buffer;
 	private ComputeBuffer optimStepCounterBuffer;
-	private ComputeBuffer primitiveKillCounters;
-	private ComputeBuffer appendValidIDsBuffer;
-	private ComputeBuffer appendInvalidIDsBuffer;
-	private ComputeBuffer argsValidIDsBuffer;
-	private ComputeBuffer argsInvalidIDsBuffer;
-	private ComputeBuffer argsResampling;
-	private GraphicsBuffer sortedPrimitiveIDBuffer;
-	private ComputeBuffer sortedValidPrimitiveIDBuffer;
 	private Bounds mesh3DSceneBounds;
 	private int currentViewPoint = 0;
 	public int currentOptimStep = 0;
@@ -48,30 +49,24 @@ public class StochasticOptimizer : MonoBehaviour
 	private Color depthIDClearColor = new Color(4294967295, 0, 0, 0);
 	private Stopwatch systemTimer = new Stopwatch();
 	private int optimStepsSeparateCount = 1;
+	private int vertexCount;
+	private int triangleCount;
 
 	// Compute kernels
 	private int kernelReset;
 	private int kernelRandomPerturbation;
 	private int kernelGradientEstimation;
 	private int kernelGradientEstimationPost;
+	private int kernelInitJacobiGradient;
+	private int kernelGradientPrecondition;
 	private int kernelGradientDescent;
-
-	private int kernelResetVisibilityCounter;
-	private int kernelDecrementVisibilityCounter;
-	private int kernelResetSeenPrimitivesVisibilityCounter;
-	private int kernelListValidAndInvalidPrimitiveIDs;
-	private int kernelInitArgsResampling;
-	private int kernelInitBitonicSortValidPrimitives;
-	private int kernelBitonicSortValidPrimitives;
-	private int kernelPairResampling;
 
 	// ======================= INTERFACE =======================
 	public Vector2Int targetResolution = new Vector2Int(512, 512);
+	// Su:Add an init mesh
+	public GameObject init3DMesh;
 	public GameObject target3DMesh;
-	public int primitiveCount = 1;
-	public float primitiveInitSize = 1.0f;
-	public int primitiveInitSeed = -1;
-	public bool initPrimitivesOnMeshSurface = false;
+	public int primitiveCount;
 	public Vector2 randomViewZoomRange = Vector2.one;
 
 	public bool reset = false;
@@ -90,17 +85,16 @@ public class StochasticOptimizer : MonoBehaviour
 	[Range(0.0f, 1.0f)] public float beta2 = 0.999f;
 	[LogarithmicRange(0.0f, 0.001f, 1.0f)] public float learningRatePosition = 0.01f;
 	[LogarithmicRange(0.0f, 0.001f, 1.0f)] public float learningRateColor = 0.01f;
-
-	public bool doPrimitiveResampling = true;
-	public int resamplingInterval = 1;
-	public int optimStepsUnseenBeforeKill = 16;
-	public float minPrimitiveWorldArea = 0.0001f;
+	[LogarithmicRange(0.0f, 0.001f, 1.0f)] public float lambdaLap = 0.01f;
 
 	public float millisecondsPerOptimStep = 0.0f;
 	public float totalElapsedSeconds = 0.0f;
-
-
-
+	
+	private float chamfer;
+	private Vector3[] verticesDst;
+	private KDTree verticesDstKDTree;
+	private KDQuery query;
+	
 
 	// =========================== UNITY ===========================
 	void OnEnable()
@@ -109,7 +103,6 @@ public class StochasticOptimizer : MonoBehaviour
 		System.Globalization.CultureInfo.DefaultThreadCurrentUICulture = System.Globalization.CultureInfo.InvariantCulture;
 		Physics.simulationMode = SimulationMode.Script;
 		stochasticOptimizerCS = (ComputeShader)Resources.Load("StochasticOptimizer");
-		triangleResamplingCS = (ComputeShader)Resources.Load("TriangleResampling");
 		cameraDisplay = GameObject.Find("CameraDisplay").GetComponent<Camera>();
 		cameraOptim = GameObject.Find("CameraOptim").GetComponent<Camera>();
 
@@ -117,17 +110,19 @@ public class StochasticOptimizer : MonoBehaviour
 		kernelRandomPerturbation = stochasticOptimizerCS.FindKernel("RandomPerturbation");
 		kernelGradientEstimation = stochasticOptimizerCS.FindKernel("GradientEstimation");
 		kernelGradientEstimationPost = stochasticOptimizerCS.FindKernel("GradientEstimationPost");
+		kernelInitJacobiGradient = stochasticOptimizerCS.FindKernel("InitJacobiGradient");
+		kernelGradientPrecondition = stochasticOptimizerCS.FindKernel("GradientPrecondition");
 		kernelGradientDescent = stochasticOptimizerCS.FindKernel("GradientDescent");
 
-		kernelResetVisibilityCounter = triangleResamplingCS.FindKernel("ResetVisibilityCounter");
-		kernelDecrementVisibilityCounter = triangleResamplingCS.FindKernel("DecrementVisibilityCounter");
-		kernelResetSeenPrimitivesVisibilityCounter = triangleResamplingCS.FindKernel("ResetSeenPrimitivesVisibilityCounter");
-		kernelListValidAndInvalidPrimitiveIDs = triangleResamplingCS.FindKernel("ListValidAndInvalidPrimitiveIDs");
-		kernelInitArgsResampling = triangleResamplingCS.FindKernel("InitArgsResampling");
-		kernelInitBitonicSortValidPrimitives = triangleResamplingCS.FindKernel("InitBitonicSortValidPrimitives");
-		kernelBitonicSortValidPrimitives = triangleResamplingCS.FindKernel("BitonicSortValidPrimitives");
-		kernelPairResampling = triangleResamplingCS.FindKernel("PairResampling");
-
+		DebugGUI.SetGraphProperties("chamfer", "chamfer", 0, 0.5f, 1, Color.red, true);
+		
+		verticesDst = target3DMesh.GetComponentInChildren<MeshFilter>().sharedMesh.vertices;
+		for (int i = 0; i < verticesDst.Length; i++)
+		{
+			verticesDst[i] = target3DMesh.transform.TransformPoint(verticesDst[i]);
+		}
+		verticesDstKDTree = new KDTree(verticesDst);
+		query =  new KDQuery();
 	}
 
 	void Update()
@@ -165,14 +160,6 @@ public class StochasticOptimizer : MonoBehaviour
 
 		// Prepare parameters
 		SetSharedComputeFrameParameters(stochasticOptimizerCS);
-		SetSharedComputeFrameParameters(triangleResamplingCS);
-
-		// Decrement visibility counters every optim step
-		if (doPrimitiveResampling == true)
-		{
-			triangleResamplingCS.SetBuffer(kernelDecrementVisibilityCounter, "_PrimitiveKillCounters", primitiveKillCounters);
-			DispatchCompute1D(triangleResamplingCS, kernelDecrementVisibilityCounter, primitiveCount, 256);
-		}
 
 		// Accumulate gradients for this optim step
 		for (int i = 0; i < viewsPerOptimStep; i++)
@@ -208,14 +195,6 @@ public class StochasticOptimizer : MonoBehaviour
 			stochasticOptimizerCS.SetFloat("_LearningRatePosition", learningRatePosition);
 			stochasticOptimizerCS.SetFloat("_LearningRateColor", learningRateColor);
 
-			// Reset visibility counter of triangles seen during this step
-			if (doPrimitiveResampling == true)
-			{
-				triangleResamplingCS.SetBuffer(kernelResetSeenPrimitivesVisibilityCounter, "_PrimitiveKillCounters", primitiveKillCounters);
-				triangleResamplingCS.SetTexture(kernelResetSeenPrimitivesVisibilityCounter, "_IDBuffer", idBufferMutatedPlus);
-				triangleResamplingCS.Dispatch(kernelResetSeenPrimitivesVisibilityCounter, (int)math.ceil(targetResolution.x / 16.0f), (int)math.ceil(targetResolution.y / 16.0f), 1);
-			}
-
 			// Next camera position
 			currentViewPoint += 1;
 		}
@@ -223,9 +202,13 @@ public class StochasticOptimizer : MonoBehaviour
 
 		// Apply accumulated gradient for this optim step
 		DoGradientDescent();
-		if (currentOptimStep > 1)
-			DoTriangleResampling(0);
 		ResetOptimizationStep();
+		
+		Profiler.BeginSample("VisualizeLoss");
+		// Visualize loss
+		if (currentOptimStep % 50 == 0)
+			VisualizeLoss();
+		Profiler.EndSample();
 
 		// Metrics
 		currentOptimStep += 1;
@@ -289,6 +272,18 @@ public class StochasticOptimizer : MonoBehaviour
 		if (primitiveBuffer != null)
 			primitiveBuffer.Release();
 		primitiveBuffer = null;
+		if (indexBuffer != null)
+			indexBuffer.Release();
+		indexBuffer = null;
+		if (AdjacencyBuffer != null)
+			AdjacencyBuffer.Release();
+		AdjacencyBuffer = null;
+		if (AdjacencyStartBuffer != null)
+			AdjacencyStartBuffer.Release();
+		AdjacencyStartBuffer = null;
+		if (AdjacencyCountBuffer != null)
+			AdjacencyCountBuffer.Release();
+		AdjacencyCountBuffer = null;
 		ReleaseOptimBuffers();
 	}
 
@@ -308,6 +303,10 @@ public class StochasticOptimizer : MonoBehaviour
 			renderedFrameMutatedPlus.Release();
 		if (optimStepGradientsBuffer != null)
 			optimStepGradientsBuffer.Release();
+		if (jacobiGradientsInBuffer != null)
+			jacobiGradientsInBuffer.Release();
+		if (jacobiGradientsOutBuffer != null)
+			jacobiGradientsOutBuffer.Release();
 		if (optimStepMutationError != null)
 			optimStepMutationError.Release();
 		if (gradientMoments1Buffer != null)
@@ -316,26 +315,10 @@ public class StochasticOptimizer : MonoBehaviour
 			gradientMoments2Buffer.Release();
 		if (optimStepCounterBuffer != null)
 			optimStepCounterBuffer.Release();
-		if (primitiveKillCounters != null)
-			primitiveKillCounters.Release();
-		if (appendValidIDsBuffer != null)
-			appendValidIDsBuffer.Release();
-		if (appendInvalidIDsBuffer != null)
-			appendInvalidIDsBuffer.Release();
-		if (argsValidIDsBuffer != null)
-			argsValidIDsBuffer.Release();
-		if (argsInvalidIDsBuffer != null)
-			argsInvalidIDsBuffer.Release();
-		if (sortedPrimitiveIDBuffer != null)
-			sortedPrimitiveIDBuffer.Release();
-		if (sortedValidPrimitiveIDBuffer != null)
-			sortedValidPrimitiveIDBuffer.Release();
 		if (targetFrameBuffer != null)
 			targetFrameBuffer.Release();
-		if (argsResampling != null)
-			argsResampling.Release();
 	}
-
+	
 	void OnRenderObject()
 	{
 		// Only to render primitives in free view
@@ -345,25 +328,35 @@ public class StochasticOptimizer : MonoBehaviour
 		Vector3 cameraPos = Camera.current.transform.position;
 		Matrix4x4 cameraVP = GL.GetGPUProjectionMatrix(Camera.current.projectionMatrix, true) * Camera.current.worldToCameraMatrix;
 		rasterMaterial.SetMatrix("_CameraMatrixVP", cameraVP);
-		rasterMaterial.SetInt("_PrimitiveCount", primitiveBuffer.count);
+		rasterMaterial.SetInt("_VertexCount", vertexCount);
 		rasterMaterial.SetBuffer("_PrimitiveBuffer", primitiveBuffer);
+		rasterMaterial.SetBuffer("_IndexBuffer", indexBuffer);
+		// Enable debug wireframe mode
+		rasterMaterial.SetInt("_EnableWireframe", 1);
+		rasterMaterial.SetFloat("_WireWidth", 2.0f);
 		rasterMaterial.SetPass(0);
-		Graphics.DrawProceduralNow(MeshTopology.Triangles, 3, primitiveCount);
+		Graphics.DrawProceduralNow(MeshTopology.Triangles, triangleCount * 3);
 	}
 
 
 
 
 	// ======================= OPTIMIZATION =======================
+	// Su: 
 	public void RenderOptimizationSceneWithIDs(Camera cameraToUse, ComputeBuffer primitiveBufferToUse, RenderTexture renderTargetToUse, RenderTexture idRenderTargetToUse)
 	{
+		// Disable debug wireframe mode
+		rasterMaterial.SetInt("_EnableWireframe", 0);
+		//rasterMaterial.SetFloat("_WireWidth", 2.0f);
+		
 		// Camera setup
 		Matrix4x4 cameraVP = GL.GetGPUProjectionMatrix(cameraToUse.projectionMatrix, true) * cameraToUse.worldToCameraMatrix;
 		rasterMaterial.SetMatrix("_CameraMatrixVP", cameraVP);
 
 		// Render primitives ID+Depth
-		rasterMaterial.SetInt("_PrimitiveCount", primitiveBufferToUse.count);
+		rasterMaterial.SetInt("_VertexCount", vertexCount);
 		rasterMaterial.SetBuffer("_PrimitiveBuffer", primitiveBufferToUse);
+		rasterMaterial.SetBuffer("_IndexBuffer", indexBuffer);
 
 		// Clear targets
 		Graphics.SetRenderTarget(idRenderTargetToUse.colorBuffer, idRenderTargetToUse.depthBuffer);
@@ -375,7 +368,7 @@ public class StochasticOptimizer : MonoBehaviour
 		RenderBuffer[] mrt = new RenderBuffer[] { renderTargetToUse.colorBuffer, idRenderTargetToUse.colorBuffer };
 		Graphics.SetRenderTarget(mrt, idRenderTargetToUse.depthBuffer);
 		rasterMaterial.SetPass(0);
-		Graphics.DrawProceduralNow(MeshTopology.Triangles, 3, primitiveBufferToUse.count);
+		Graphics.DrawProceduralNow(MeshTopology.Triangles, triangleCount * 3);
 	}
 
 	public void ResetOptimizationStep()
@@ -397,11 +390,39 @@ public class StochasticOptimizer : MonoBehaviour
 		stochasticOptimizerCS.Dispatch(kernelGradientEstimation, (int)math.ceil(targetResolution.x / 16.0f), (int)math.ceil(targetResolution.y / 16.0f), 1);
 
 		// Accumulate gradients
+		stochasticOptimizerCS.SetFloat("_LambdaLap", lambdaLap);
+		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_IndexBuffer", indexBuffer);
+		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_AdjacencyBuffer", AdjacencyBuffer);
+		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_AdjacencyStartBuffer", AdjacencyStartBuffer);
+		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_AdjacencyCountBuffer", AdjacencyCountBuffer);
 		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_PrimitiveBuffer", primitiveBuffer);
 		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_PrimitiveBufferMutated", primitiveBufferMutated);
 		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_PrimitiveMutationError", optimStepMutationError);
 		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_PrimitiveGradientsOptimStep", optimStepGradientsBuffer);
-		DispatchCompute1D(stochasticOptimizerCS, kernelGradientEstimationPost, primitiveBuffer.count, 256);
+		DispatchCompute1D(stochasticOptimizerCS, kernelGradientEstimationPost, primitiveCount, 256);
+		
+		// Init ping-pong buffer
+		stochasticOptimizerCS.SetBuffer(kernelInitJacobiGradient, "_PrimitiveGradientsOptimStep", optimStepGradientsBuffer);
+		stochasticOptimizerCS.SetBuffer(kernelInitJacobiGradient, "_JacobiGradientsIn", jacobiGradientsInBuffer);
+		DispatchCompute1D(stochasticOptimizerCS, kernelInitJacobiGradient, primitiveCount, 256);
+		
+		// Gradient Precondition
+		stochasticOptimizerCS.SetFloat("_Alpha", 0.002f);
+		stochasticOptimizerCS.SetFloat("_LambdaLap", lambdaLap);
+		stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_PrimitiveGradientsOptimStep", optimStepGradientsBuffer);
+		stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_AdjacencyBuffer", AdjacencyBuffer);
+		stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_AdjacencyStartBuffer", AdjacencyStartBuffer);
+		stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_AdjacencyCountBuffer", AdjacencyCountBuffer);
+		for (int k = 0; k < 15; k++)
+		{
+			stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_JacobiGradientsIn", jacobiGradientsInBuffer);
+			stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_JacobiGradientsOut", jacobiGradientsOutBuffer);
+			DispatchCompute1D(stochasticOptimizerCS, kernelGradientPrecondition, vertexCount, 256);
+			
+			stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_JacobiGradientsIn", jacobiGradientsOutBuffer);
+			stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_JacobiGradientsOut", jacobiGradientsInBuffer);
+			DispatchCompute1D(stochasticOptimizerCS, kernelGradientPrecondition, vertexCount, 256);
+		}
 	}
 
 	public void DoGradientDescent()
@@ -409,7 +430,7 @@ public class StochasticOptimizer : MonoBehaviour
 		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveBuffer", primitiveBuffer);
 		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveGradientsMoments1", gradientMoments1Buffer);
 		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveGradientsMoments2", gradientMoments2Buffer);
-		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveGradientsOptimStep", optimStepGradientsBuffer);
+		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveGradientsOptimStep", jacobiGradientsInBuffer);
 		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveOptimStepCounter", optimStepCounterBuffer);
 		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveMutationError", optimStepMutationError);
 		DispatchCompute1D(stochasticOptimizerCS, kernelGradientDescent, primitiveBuffer.count, 256);
@@ -421,71 +442,57 @@ public class StochasticOptimizer : MonoBehaviour
 		stochasticOptimizerCS.SetBuffer(kernelRandomPerturbation, "_PrimitiveBufferMutated", primitiveBufferMutated);
 		DispatchCompute1D(stochasticOptimizerCS, kernelRandomPerturbation, primitiveBuffer.count, 256);
 	}
-
-	public void DoTriangleResampling(int primitiveGroupToUse)
+	
+	
+	
+	
+	// ======================= EVALUATION =======================
+	public void VisualizeLoss()
 	{
-		if (doPrimitiveResampling == false)
-			return;
+		Vector3[] verticesSrc = new Vector3[vertexCount];
+		primitiveBuffer.GetData(verticesSrc, 0, 0, vertexCount);
+		KDTree verticesSrcKDTree = new KDTree(verticesSrc);
+		
+		// Compute distance
+		double sumSrcToDst = 0.0;
+		double sumDstToSrc = 0.0;
 
-		// Only perform resampling at desired interval
-		if (currentOptimStep % resamplingInterval != 0)
-			return;
-
-		// List valid and invalid primitive IDs
-		appendValidIDsBuffer.SetCounterValue(0);
-		appendInvalidIDsBuffer.SetCounterValue(0);
-		triangleResamplingCS.SetInt("_CurrentPairingOffset", (int)(UnityEngine.Random.value * primitiveCount));
-		triangleResamplingCS.SetBuffer(kernelListValidAndInvalidPrimitiveIDs, "_PrimitiveBuffer", primitiveBuffer);
-		triangleResamplingCS.SetBuffer(kernelListValidAndInvalidPrimitiveIDs, "_PrimitiveGradientsMoments1", gradientMoments1Buffer);
-		triangleResamplingCS.SetBuffer(kernelListValidAndInvalidPrimitiveIDs, "_PrimitiveGradientsMoments2", gradientMoments2Buffer);
-		triangleResamplingCS.SetBuffer(kernelListValidAndInvalidPrimitiveIDs, "_PrimitiveOptimStepCounter", optimStepCounterBuffer);
-		triangleResamplingCS.SetBuffer(kernelListValidAndInvalidPrimitiveIDs, "_PrimitiveKillCounters", primitiveKillCounters);
-		triangleResamplingCS.SetBuffer(kernelListValidAndInvalidPrimitiveIDs, "_AppendValidPrimitiveIDs", appendValidIDsBuffer);
-		triangleResamplingCS.SetBuffer(kernelListValidAndInvalidPrimitiveIDs, "_AppendInvalidPrimitiveIDs", appendInvalidIDsBuffer);
-		DispatchCompute1D(triangleResamplingCS, kernelListValidAndInvalidPrimitiveIDs, primitiveCount, 256);
-
-		// Init resampling indirect dispatch args
-		ComputeBuffer.CopyCount(appendValidIDsBuffer, argsValidIDsBuffer, 0);
-		ComputeBuffer.CopyCount(appendInvalidIDsBuffer, argsInvalidIDsBuffer, 0);
-		triangleResamplingCS.SetBuffer(kernelInitArgsResampling, "_ArgsValidPrimitiveIDs", argsValidIDsBuffer);
-		triangleResamplingCS.SetBuffer(kernelInitArgsResampling, "_ArgsInvalidPrimitiveIDs", argsInvalidIDsBuffer);
-		triangleResamplingCS.SetBuffer(kernelInitArgsResampling, "_ArgsResampling", argsResampling);
-		triangleResamplingCS.Dispatch(kernelInitArgsResampling, 1, 1, 1);
-
-		// Sort valid primitives by importance criteria
-		triangleResamplingCS.SetInt("_PrimitiveCountPow2", sortedValidPrimitiveIDBuffer.count);
-		triangleResamplingCS.SetBuffer(kernelInitBitonicSortValidPrimitives, "_PrimitiveBuffer", primitiveBuffer);
-		triangleResamplingCS.SetBuffer(kernelInitBitonicSortValidPrimitives, "_PrimitiveGradientsMoments1", gradientMoments1Buffer);
-		triangleResamplingCS.SetBuffer(kernelInitBitonicSortValidPrimitives, "_PrimitiveGradientsMoments2", gradientMoments2Buffer);
-		triangleResamplingCS.SetBuffer(kernelInitBitonicSortValidPrimitives, "_ReadValidPrimitiveIDs", appendValidIDsBuffer);
-		triangleResamplingCS.SetBuffer(kernelInitBitonicSortValidPrimitives, "_SortedValidPrimitiveIDs", sortedValidPrimitiveIDBuffer);
-		triangleResamplingCS.SetBuffer(kernelInitBitonicSortValidPrimitives, "_ArgsValidPrimitiveIDs", argsValidIDsBuffer);
-		DispatchCompute1D(triangleResamplingCS, kernelInitBitonicSortValidPrimitives, primitiveCount, 256);
-		triangleResamplingCS.SetBuffer(kernelBitonicSortValidPrimitives, "_SortedValidPrimitiveIDs", sortedValidPrimitiveIDBuffer);
-		for (uint d2 = 1; d2 < sortedValidPrimitiveIDBuffer.count; d2 *= 2)
+		// ----- SRC -> DST -----
+		for (int i = 0; i < verticesSrc.Length; i++)
 		{
-			for (uint d1 = d2; d1 >= 1u; d1 /= 2)
-			{
-				triangleResamplingCS.SetInt("_SortLoopValueX", (int)d1);
-				triangleResamplingCS.SetInt("_SortLoopValueY", (int)d2);
-				DispatchCompute1D(triangleResamplingCS, kernelBitonicSortValidPrimitives, sortedValidPrimitiveIDBuffer.count, 256);
-			}
+			Vector3 a = verticesSrc[i];
+			
+			List<float> distances = new List<float>();
+			query.ClosestPoint(verticesDstKDTree, a,  null, distances);
+			float minDistSqr = distances[0];
+
+			float dist = Mathf.Sqrt(minDistSqr);
+
+			sumSrcToDst += dist;
 		}
 
-		// Resample primitive pairs
-		triangleResamplingCS.SetInt("_CurrentView", currentViewPoint);
-		triangleResamplingCS.SetBuffer(kernelPairResampling, "_PrimitiveBuffer", primitiveBuffer);
-		triangleResamplingCS.SetBuffer(kernelPairResampling, "_PrimitiveKillCounters", primitiveKillCounters);
-		triangleResamplingCS.SetBuffer(kernelPairResampling, "_PrimitiveGradientsMoments1", gradientMoments1Buffer);
-		triangleResamplingCS.SetBuffer(kernelPairResampling, "_PrimitiveGradientsMoments2", gradientMoments2Buffer);
-		triangleResamplingCS.SetBuffer(kernelPairResampling, "_PrimitiveOptimStepCounter", optimStepCounterBuffer);
-		triangleResamplingCS.SetBuffer(kernelPairResampling, "_ArgsResampling", argsResampling);
-		triangleResamplingCS.SetBuffer(kernelPairResampling, "_ReadValidPrimitiveIDs", appendValidIDsBuffer);
-		triangleResamplingCS.SetBuffer(kernelPairResampling, "_SortedValidPrimitiveIDs", sortedValidPrimitiveIDBuffer);
-		triangleResamplingCS.SetBuffer(kernelPairResampling, "_ReadInvalidPrimitiveIDs", appendInvalidIDsBuffer);
-		triangleResamplingCS.DispatchIndirect(kernelPairResampling, argsResampling);
-	}
+		// ----- DST -> SRC -----
+		for (int i = 0; i < verticesDst.Length; i++)
+		{
+			Vector3 b = verticesDst[i];
+			
+			List<float> distances = new List<float>();
+			query.ClosestPoint(verticesSrcKDTree, b,  null, distances);
+			float minDistSqr = distances[0];
 
+			float dist = Mathf.Sqrt(minDistSqr);
+
+			sumDstToSrc += dist;
+		}
+		
+		chamfer = (float)(
+			sumSrcToDst / verticesSrc.Length +
+			sumDstToSrc / verticesDst.Length
+		);
+		
+		DebugGUI.Graph("chamfer", chamfer);
+		Debug.Log("step: " + currentOptimStep + " chamfer: " + chamfer);
+	}
 
 
 
@@ -493,7 +500,8 @@ public class StochasticOptimizer : MonoBehaviour
 	public void SetSharedComputeFrameParameters(ComputeShader computeShader)
 	{
 		// Set shared parameters
-		computeShader.SetInt("_PrimitiveCount", primitiveBuffer.count);
+		computeShader.SetInt("_VertexCount", vertexCount);
+		computeShader.SetInt("_PrimitiveCount", primitiveCount);
 		computeShader.SetInt("_CurrentOptimStep", currentOptimStep);
 		computeShader.SetInt("_OutputWidth", targetResolution.x);
 		computeShader.SetInt("_OutputHeight", targetResolution.y);
@@ -501,8 +509,6 @@ public class StochasticOptimizer : MonoBehaviour
 		computeShader.SetInt("_LossMode", lossMode == LossMode.L1 ? 0 : 1);
 		computeShader.SetFloat("_OptimizerBeta1", beta1);
 		computeShader.SetFloat("_OptimizerBeta2", beta2);
-		computeShader.SetFloat("_MinPrimitiveWorldArea", minPrimitiveWorldArea);
-		computeShader.SetInt("_FramesUnseenBeforeKill", optimStepsUnseenBeforeKill);
 		computeShader.SetInt("_ViewsPerOptimStep", viewsPerOptimStep);
 		computeShader.SetFloat("_DoAlphaLoss", doAlphaLoss ? 1.0f : 0.0f);
 		computeShader.SetFloat("_LearningRatePosition", learningRatePosition);
@@ -532,7 +538,9 @@ public class StochasticOptimizer : MonoBehaviour
 				mesh3DSceneBounds.Encapsulate(allRenderers[i].bounds);
 
 		// Primitive buffer
-		InitPrimitiveBuffer();
+		// InitPrimitiveBuffer();
+		// Su: Use an init mesh to init the primitive buffer
+		InitTrianglePrimitiveBufferWithInitMesh(ref primitiveBuffer);
 
 		cameraDisplay.GetComponent<OrbitCamera>().target = mesh3DSceneBounds;
 		InitAllOptimBuffers();
@@ -554,7 +562,7 @@ public class StochasticOptimizer : MonoBehaviour
 		ReleaseOptimBuffers();
 
 		// Init rendering material
-		rasterMaterial = new Material(Shader.Find("Custom/TriangleSoupRasterizer"));
+		rasterMaterial = new Material(Shader.Find("Custom/MeshRasterizer"));
 		rasterMaterial.hideFlags = HideFlags.DontSave;
 
 		// Init everything
@@ -571,35 +579,23 @@ public class StochasticOptimizer : MonoBehaviour
 		targetFrameBuffer = new RenderTexture(targetResolution.x, targetResolution.y, 32, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
 
 		// Optim buffers
-		int primitiveByteSize = 48;
-		optimStepGradientsBuffer = new ComputeBuffer(primitiveCount, primitiveByteSize);
+		int primitiveByteSize = 12;
+		optimStepGradientsBuffer = new ComputeBuffer(primitiveCount, sizeof(int) * 3);
+		jacobiGradientsInBuffer = new ComputeBuffer(primitiveCount, sizeof(int) * 3);
+		jacobiGradientsOutBuffer = new ComputeBuffer(primitiveCount, sizeof(int) * 3);
 		gradientMoments1Buffer = new ComputeBuffer(primitiveCount, primitiveByteSize);
 		gradientMoments2Buffer = new ComputeBuffer(primitiveCount, primitiveByteSize);
 		primitiveBufferMutated = new ComputeBuffer(primitiveCount, primitiveByteSize);
-		optimStepMutationError = new ComputeBuffer(primitiveCount, sizeof(int));
+		optimStepMutationError = new ComputeBuffer(triangleCount, sizeof(int));
 		optimStepCounterBuffer = new ComputeBuffer(primitiveCount, sizeof(int));
-		primitiveKillCounters = new ComputeBuffer(primitiveCount, sizeof(int));
 		ZeroInitBuffer(optimStepGradientsBuffer);
+		ZeroInitBuffer(jacobiGradientsInBuffer);
+		ZeroInitBuffer(jacobiGradientsOutBuffer);
 		ZeroInitBuffer(gradientMoments1Buffer);
 		ZeroInitBuffer(gradientMoments2Buffer);
 		ZeroInitBuffer(primitiveBufferMutated);
 		ZeroInitBuffer(optimStepMutationError);
 		ZeroInitBuffer(optimStepCounterBuffer);
-
-		// Resampling buffers
-		appendValidIDsBuffer = new ComputeBuffer(primitiveCount, sizeof(uint), ComputeBufferType.Append);
-		argsValidIDsBuffer = new ComputeBuffer(4, sizeof(int), ComputeBufferType.IndirectArguments);
-		appendInvalidIDsBuffer = new ComputeBuffer(primitiveCount, sizeof(uint), ComputeBufferType.Append);
-		argsInvalidIDsBuffer = new ComputeBuffer(4, sizeof(int), ComputeBufferType.IndirectArguments);
-		argsResampling = new ComputeBuffer(4, sizeof(int), ComputeBufferType.IndirectArguments);
-		int sortCount = (int)(math.ceilpow2(primitiveCount));
-		sortedValidPrimitiveIDBuffer = new ComputeBuffer(sortCount, sizeof(uint) * 2);
-
-		// Init kill counters
-		triangleResamplingCS.SetInt("_PrimitiveCount", primitiveBuffer.count);
-		triangleResamplingCS.SetInt("_FramesUnseenBeforeKill", optimStepsUnseenBeforeKill);
-		triangleResamplingCS.SetBuffer(kernelResetVisibilityCounter, "_PrimitiveKillCounters", primitiveKillCounters);
-		DispatchCompute1D(triangleResamplingCS, kernelResetVisibilityCounter, primitiveBuffer.count, 256);
 	}
 
 	private static void DispatchCompute1D(ComputeShader compute, int kernel, int threadCount, int groupSizeX)
@@ -626,94 +622,68 @@ public class StochasticOptimizer : MonoBehaviour
 
 
 	// ======================= PRIMITIVE INIT =======================
-	public void InitPrimitiveBuffer()
-	{
-		// Random seed
-		if (primitiveInitSeed < 0)
-			primitiveInitSeed = (int)(UnityEngine.Random.value * int.MaxValue);
-		UnityEngine.Random.InitState(primitiveInitSeed);
-
-		// Init random positions
-		float3[] positions = new float3[primitiveCount];
-		float[] initSizes = new float[0];
-
-		if (initPrimitivesOnMeshSurface == true)
-			InitPositionsOnMeshSurface(positions);
-		else
-			InitPositionsInsideBounds(positions);
-
-		// Init primitive buffer
-		InitTrianglePrimitiveBuffer(ref primitiveBuffer, positions, initSizes);
-	}
-
-	public void InitPositionsInsideBounds(float3[] positions)
-	{
-		// Init random primitives within target bounds
-		Bounds targetBounds = mesh3DSceneBounds;
-		for (int i = 0; i < primitiveCount; i++)
-		{
-			float3 randPos = new float3(UnityEngine.Random.value, UnityEngine.Random.value, UnityEngine.Random.value) * 2.0f - 1.0f;
-			randPos = new float3(targetBounds.center) + randPos * new float3(targetBounds.extents);
-			positions[i] = randPos;
-		}
-	}
-
-	public void InitPositionsOnMeshSurface(float3[] positions)
-	{
-		// Init random triangles on target mesh surface
-		Vector3[] targetVertices = target3DMesh.GetComponent<MeshFilter>().sharedMesh.vertices;
-		int[] triangles = target3DMesh.GetComponent<MeshFilter>().sharedMesh.triangles;
-		int targetTriangleCount = triangles.Length / 3;
-
-		for (int i = 0; i < primitiveCount; i++)
-		{
-			// Select random triangle
-			int triangleID = (int)math.min(targetTriangleCount - 1, UnityEngine.Random.value * targetTriangleCount);
-			Vector3 vertexA = target3DMesh.transform.TransformPoint(targetVertices[triangles[triangleID * 3 + 0]]);
-			Vector3 vertexB = target3DMesh.transform.TransformPoint(targetVertices[triangles[triangleID * 3 + 1]]);
-			Vector3 vertexC = target3DMesh.transform.TransformPoint(targetVertices[triangles[triangleID * 3 + 2]]);
-
-			// Random position in triangle
-			float2 randTriangle = new float2(UnityEngine.Random.value, UnityEngine.Random.value);
-			if (randTriangle.x + randTriangle.y >= 1)
-				randTriangle = 1.0f - randTriangle;
-			float3 randPos = vertexA + randTriangle.x * (vertexB - vertexA) + randTriangle.y * (vertexC - vertexA);
-			positions[i] = randPos;
-		}
-	}
-
-	public void InitTrianglePrimitiveBuffer(ref ComputeBuffer primitiveBufferToInit, float3[] positions, float[] initSizes)
+	// Su:Init triangle primitive buffer with an init mesh
+	public void InitTrianglePrimitiveBufferWithInitMesh(ref ComputeBuffer primitiveBufferToInit)
 	{
 		// Init data on CPU
-		int primitiveFloatSize = 12;
-		float[] randData = new float[primitiveCount * primitiveFloatSize];
+		// Get the init mesh's geometry data
+		//Vector3[] vertices = init3DMesh.GetComponent<MeshFilter>().sharedMesh.vertices;
+		// The "triangles" below is actually the index buffer
+		//int[] triangles = init3DMesh.GetComponent<MeshFilter>().sharedMesh.triangles;
+		Vector3[] vertices;
+		int[] triangles;
 
-		for (int i = 0; i < primitiveCount; i++)
+		IcosphereGenerator.Generate(
+			subdivision: 4,
+			out vertices,
+			out triangles
+			);
+
+		triangleCount = triangles.Length / 3;
+		indexBuffer = new ComputeBuffer(triangles.Length, sizeof(int));
+		indexBuffer.SetData(triangles);
+		vertexCount = vertices.Length;
+		
+		int[] adjacency;
+		int[] adjacencyStart;
+		int[] adjacencyCount;
+		
+		IcosphereGenerator.GetAdjacency(
+			vertices,
+			triangles,
+			out adjacency,
+			out adjacencyStart,
+			out adjacencyCount
+		);
+		
+		AdjacencyBuffer = new ComputeBuffer(adjacency.Length, sizeof(int));
+		AdjacencyBuffer.SetData(adjacency);
+		AdjacencyStartBuffer =  new ComputeBuffer(adjacencyStart.Length, sizeof(int));
+		AdjacencyStartBuffer.SetData(adjacencyStart);
+		AdjacencyCountBuffer = new ComputeBuffer(adjacencyCount.Length, sizeof(int));
+		AdjacencyCountBuffer.SetData(adjacencyCount);
+		
+		// Primitive Buffer: vertex(XYZ) + triangle color(RGB)
+		primitiveCount = vertexCount + triangleCount;
+		float3[] data = new float3[primitiveCount];
+
+		for (int i = 0; i < vertexCount; i++)
 		{
-			int offset = 0;
-
-			// Init random triangle positions
-			float initSizeToUse = primitiveInitSize * (initSizes.Length > 0 ? initSizes[i] : 1);
-			float3 randPos = positions[i];
-			float3 position0 = randPos + new float3(UnityEngine.Random.onUnitSphere) * initSizeToUse;
-			float3 position1 = randPos + new float3(UnityEngine.Random.onUnitSphere) * initSizeToUse;
-			float3 position2 = randPos + new float3(UnityEngine.Random.onUnitSphere) * initSizeToUse;
-			randData[i * primitiveFloatSize + offset + 0] = position0.x; randData[i * primitiveFloatSize + offset + 1] = position0.y; randData[i * primitiveFloatSize + offset + 2] = position0.z; offset += 3;
-			randData[i * primitiveFloatSize + offset + 0] = position1.x; randData[i * primitiveFloatSize + offset + 1] = position1.y; randData[i * primitiveFloatSize + offset + 2] = position1.z; offset += 3;
-			randData[i * primitiveFloatSize + offset + 0] = position2.x; randData[i * primitiveFloatSize + offset + 1] = position2.y; randData[i * primitiveFloatSize + offset + 2] = position2.z; offset += 3;
-
-			// Init random triangle color
-			Color randColor = UnityEngine.Random.ColorHSV(0, 1, 0, 1);
-			float3 color = new float3(randColor.r, randColor.g, randColor.b);
-			randData[i * primitiveFloatSize + offset + 0] = color.x; randData[i * primitiveFloatSize + offset + 1] = color.y; randData[i * primitiveFloatSize + offset + 2] = color.z; offset += 3;
+			Vector3 vertexWorldPosition = init3DMesh.transform.TransformPoint(vertices[i]);
+			data[i] = vertexWorldPosition;
 		}
 
+		for (int i = vertexCount; i < primitiveCount; i++)
+		{
+			//Color initColor = UnityEngine.Random.ColorHSV(0, 1, 0, 1);
+			Color initColor = Color.blue;
+			data[i] = new float3(initColor.r, initColor.g, initColor.b);
+		}
+		
 		// Upload data to GPU
-		primitiveBufferToInit = new ComputeBuffer(primitiveCount, sizeof(float) * primitiveFloatSize);
-		primitiveBufferToInit.SetData(randData);
+		primitiveBufferToInit = new ComputeBuffer(primitiveCount, sizeof(float) * 3);
+		primitiveBufferToInit.SetData(data);
 	}
-
-
 
 
 	// ======================= STUFF =======================
