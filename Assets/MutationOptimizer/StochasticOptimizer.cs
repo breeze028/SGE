@@ -89,7 +89,8 @@ public class StochasticOptimizer : MonoBehaviour
 
 	public float millisecondsPerOptimStep = 0.0f;
 	public float totalElapsedSeconds = 0.0f;
-	
+
+	public bool visualizeLoss;
 	private float chamfer;
 	private Vector3[] verticesDst;
 	private KDTree verticesDstKDTree;
@@ -113,8 +114,9 @@ public class StochasticOptimizer : MonoBehaviour
 		kernelInitJacobiGradient = stochasticOptimizerCS.FindKernel("InitJacobiGradient");
 		kernelGradientPrecondition = stochasticOptimizerCS.FindKernel("GradientPrecondition");
 		kernelGradientDescent = stochasticOptimizerCS.FindKernel("GradientDescent");
-
-		DebugGUI.SetGraphProperties("chamfer", "chamfer", 0, 0.5f, 1, Color.red, true);
+		
+		if (visualizeLoss)
+			DebugGUI.SetGraphProperties("chamfer", "chamfer", 0, 0.5f, 1, Color.red, true);
 		
 		verticesDst = target3DMesh.GetComponentInChildren<MeshFilter>().sharedMesh.vertices;
 		for (int i = 0; i < verticesDst.Length; i++)
@@ -206,8 +208,8 @@ public class StochasticOptimizer : MonoBehaviour
 		
 		Profiler.BeginSample("VisualizeLoss");
 		// Visualize loss
-		if (currentOptimStep % 50 == 0)
-			VisualizeLoss();
+		if (visualizeLoss && currentOptimStep % 50 == 0)
+			ComputeLoss();
 		Profiler.EndSample();
 
 		// Metrics
@@ -447,7 +449,7 @@ public class StochasticOptimizer : MonoBehaviour
 	
 	
 	// ======================= EVALUATION =======================
-	public void VisualizeLoss()
+	public void ComputeLoss()
 	{
 		Vector3[] verticesSrc = new Vector3[vertexCount];
 		primitiveBuffer.GetData(verticesSrc, 0, 0, vertexCount);

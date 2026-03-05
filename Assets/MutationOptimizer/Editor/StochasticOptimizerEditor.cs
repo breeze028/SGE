@@ -15,6 +15,7 @@ public class StochasticOptimizerEditor : Editor
 
 	SerializedProperty reset;
 	SerializedProperty pause;
+	SerializedProperty visualizeLoss;
 	SerializedProperty stepForward;
 	SerializedProperty displayMode;
 	SerializedProperty separateFreeViewCamera;
@@ -43,6 +44,7 @@ public class StochasticOptimizerEditor : Editor
 
 		reset = serializedObject.FindProperty("reset");
 		pause = serializedObject.FindProperty("pause");
+		visualizeLoss = serializedObject.FindProperty("visualizeLoss");
 		stepForward = serializedObject.FindProperty("stepForward");
 		displayMode = serializedObject.FindProperty("displayMode");
 		separateFreeViewCamera = serializedObject.FindProperty("separateFreeViewCamera");
@@ -96,6 +98,7 @@ public class StochasticOptimizerEditor : Editor
 			if (GUILayout.Button("Step Forward"))
 				stepForward.boolValue = true;
 		EditorGUILayout.PropertyField(pause);
+		EditorGUILayout.PropertyField(visualizeLoss);
 		EditorGUILayout.PropertyField(displayMode);
 		EditorGUILayout.PropertyField(separateFreeViewCamera);
 
