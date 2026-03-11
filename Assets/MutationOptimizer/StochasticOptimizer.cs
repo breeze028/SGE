@@ -9,6 +9,7 @@ using Unity.Burst;
 using Unity.Collections;
 using Unity.Jobs;
 using Unity.Mathematics;
+using UnityEditor;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Profiling;
@@ -22,13 +23,11 @@ public class StochasticOptimizer : MonoBehaviour
 	public RenderTexture idBufferMutatedPlus;
 	public RenderTexture renderedFrameMutatedMinus;
 	public RenderTexture renderedFrameMutatedPlus;
-	public RenderTexture renderedFrameFreeView;
 	public RenderTexture targetFrameBuffer;
 	private Material rasterMaterial;
 	private Camera cameraDisplay;
 	private Camera cameraOptim;
 	private ComputeShader stochasticOptimizerCS;
-	private ComputeShader triangleResamplingCS;
 	private ComputeBuffer indexBuffer;
 	private ComputeBuffer AdjacencyBuffer;
 	private ComputeBuffer AdjacencyStartBuffer;
@@ -45,10 +44,8 @@ public class StochasticOptimizer : MonoBehaviour
 	private Bounds mesh3DSceneBounds;
 	private int currentViewPoint = 0;
 	public int currentOptimStep = 0;
-	private int currentStochasticFrame = 0;
 	private Color depthIDClearColor = new Color(4294967295, 0, 0, 0);
 	private Stopwatch systemTimer = new Stopwatch();
-	private int optimStepsSeparateCount = 1;
 	private int vertexCount;
 	private int triangleCount;
 
@@ -71,6 +68,8 @@ public class StochasticOptimizer : MonoBehaviour
 
 	public bool reset = false;
 	public bool pause = false;
+	public bool lastStep2 = false;
+	public bool step2 = false;
 	public bool stepForward = false;
 	public DisplayMode displayMode = DisplayMode.Optimization;
 	public bool separateFreeViewCamera = true;
@@ -95,6 +94,10 @@ public class StochasticOptimizer : MonoBehaviour
 	private Vector3[] verticesDst;
 	private KDTree verticesDstKDTree;
 	private KDQuery query;
+
+	private int[] triangles;
+	private TextureOptimizer textureOptimizer;
+	private Mesh m;
 	
 
 	// =========================== UNITY ===========================
@@ -138,18 +141,29 @@ public class StochasticOptimizer : MonoBehaviour
 		if (Input.GetKeyDown(KeyCode.F2)) displayMode = DisplayMode.Target;
 
 		// First init
-		if (currentOptimStep == 0)
+		if (!step2 && currentOptimStep == 0)
 		{
 			ResetEverything();
 			totalElapsedSeconds = 0.0f;
 			systemTimer.Restart();
 		}
 
-		// Optimization Loop
-		OptimizationUpdate();
-
+		// Step1: Optimization Loop
+		if (!step2)
+			OptimizationUpdate();
+		
+		// Change step
+		if (!lastStep2 && step2)
+			ChangeStep();
+		
+		// Step2: Texture optimization
+		if (step2)
+			TextureOptimizationUpdate();
+		
 		// Update display
 		DisplayModeUpdate();
+		
+		lastStep2 = step2;
 	}
 
 	public void OptimizationUpdate()
@@ -222,6 +236,92 @@ public class StochasticOptimizer : MonoBehaviour
 			stepForward = false;
 	}
 
+	public void ChangeStep()
+	{
+		// Generate the mesh's uv
+		Vector3[] vertices = new Vector3[vertexCount];
+		primitiveBuffer.GetData(vertices, 0, 0, vertexCount);
+		
+		Vector3[] newVertices = new Vector3[triangles.Length];
+		int[] newTriangles = new int[triangles.Length];
+		
+		// Split vertices. For now this does not help for texture seaming issue.
+		for (int i = 0; i < triangles.Length; i++)
+		{
+			int originalVertexIndex = triangles[i];
+			newVertices[i] = vertices[originalVertexIndex];
+			newTriangles[i] = i;
+		}
+		
+		m = new Mesh();
+		//m.vertices = vertices;
+		//m.triangles = triangles;
+		m.vertices = newVertices;
+		m.triangles = newTriangles;
+		m.RecalculateNormals();
+		
+		Unwrapping.GenerateSecondaryUVSet(m);
+		
+		// Get mesh's data for step2
+		textureOptimizer = new TextureOptimizer(targetResolution);
+		
+		// Refresh the optimization step
+		currentOptimStep = 0;
+		
+		// Release step1 related resource
+		ReleaseStepOneOptimBuffers();
+	}
+
+	public void TextureOptimizationUpdate()
+	{
+		if (pause == true && stepForward == false)
+		{
+			systemTimer.Restart();
+			return;
+		}
+
+		// Prepare parameters
+		SetSharedComputeFrameParameters(textureOptimizer.textureOptimizerCS);
+
+		// Accumulate gradients for this optim step
+		for (int i = 0; i < viewsPerOptimStep; i++)
+		{
+			// Set up new view point
+			textureOptimizer.textureOptimizerCS.SetInt("_CurrentView", currentViewPoint);
+			RandomizeCameraView();
+			cameraOptim.Render();
+			
+			// Minus Epsilon
+			textureOptimizer.textureOptimizerCS.SetFloat("_IsAntitheticMutation", 1.0f);
+			textureOptimizer.DoRandomPerturbation();
+			textureOptimizer.RenderOptimizationSceneWithUVs(cameraOptim, renderedFrameMutatedMinus, textureOptimizer.uvBufferMutated, m);
+
+			// Plus Epsilon
+			textureOptimizer.textureOptimizerCS.SetFloat("_IsAntitheticMutation", 0.0f);
+			textureOptimizer.DoRandomPerturbation();
+			textureOptimizer.RenderOptimizationSceneWithUVs(cameraOptim, renderedFrameMutatedPlus, textureOptimizer.uvBufferMutated, m);
+			
+			// Accumulate Per-Pixel Stochastic Gradients
+			textureOptimizer.DoGradientEstimation(targetFrameBuffer, renderedFrameMutatedMinus, renderedFrameMutatedPlus);
+
+			// Next camera position
+			currentViewPoint += 1;
+		}
+		
+		// Apply accumulated gradient for this optim step
+		textureOptimizer.DoGradientDescent();
+		textureOptimizer.ResetOptimizationStep();
+
+		// Metrics
+		currentOptimStep += 1;
+		millisecondsPerOptimStep = (float)systemTimer.Elapsed.TotalMilliseconds;
+		totalElapsedSeconds += (float)systemTimer.Elapsed.TotalMilliseconds / 1000.0f;
+		systemTimer.Restart();
+
+		if (stepForward == true)
+			stepForward = false;		
+	}
+
 	public void DisplayModeUpdate()
 	{
 		// Update if changed
@@ -255,6 +355,8 @@ public class StochasticOptimizer : MonoBehaviour
 	void OnDisable()
 	{
 		ReleaseEverything();
+		if (textureOptimizer != null)
+			textureOptimizer.ReleaseReources();
 	}
 
 	void ReleaseEverything()
@@ -289,6 +391,30 @@ public class StochasticOptimizer : MonoBehaviour
 		ReleaseOptimBuffers();
 	}
 
+	void ReleaseStepOneOptimBuffers()
+	{
+		if (primitiveBufferMutated != null)
+			primitiveBufferMutated.Release();
+		if (idBufferMutatedPlus != null)
+			idBufferMutatedPlus.Release();
+		if (idBufferMutatedMinus != null)
+			idBufferMutatedMinus.Release();
+		if (optimStepGradientsBuffer != null)
+			optimStepGradientsBuffer.Release();
+		if (jacobiGradientsInBuffer != null)
+			jacobiGradientsInBuffer.Release();
+		if (jacobiGradientsOutBuffer != null)
+			jacobiGradientsOutBuffer.Release();
+		if (optimStepMutationError != null)
+			optimStepMutationError.Release();
+		if (gradientMoments1Buffer != null)
+			gradientMoments1Buffer.Release();
+		if (gradientMoments2Buffer != null)
+			gradientMoments2Buffer.Release();
+		if (optimStepCounterBuffer != null)
+			optimStepCounterBuffer.Release();
+	}
+
 	void ReleaseOptimBuffers()
 	{
 		if (primitiveBufferMutated != null)
@@ -297,8 +423,6 @@ public class StochasticOptimizer : MonoBehaviour
 			idBufferMutatedPlus.Release();
 		if (idBufferMutatedMinus != null)
 			idBufferMutatedMinus.Release();
-		if (renderedFrameFreeView != null)
-			renderedFrameFreeView.Release();
 		if (renderedFrameMutatedMinus != null)
 			renderedFrameMutatedMinus.Release();
 		if (renderedFrameMutatedPlus != null)
@@ -321,30 +445,58 @@ public class StochasticOptimizer : MonoBehaviour
 			targetFrameBuffer.Release();
 	}
 	
+	// Display the result. The wireframe will be enabled. This stage has nothing to do with the optimization.
 	void OnRenderObject()
 	{
-		// Only to render primitives in free view
-		if (rasterMaterial == null || Camera.current == cameraOptim || displayMode != DisplayMode.Optimization || separateFreeViewCamera == false)
-			return;
+		if (!step2)
+		{
+			// Only to render primitives in free view
+			if (rasterMaterial == null || Camera.current == cameraOptim || displayMode != DisplayMode.Optimization || separateFreeViewCamera == false)
+				return;
 
-		Vector3 cameraPos = Camera.current.transform.position;
-		Matrix4x4 cameraVP = GL.GetGPUProjectionMatrix(Camera.current.projectionMatrix, true) * Camera.current.worldToCameraMatrix;
-		rasterMaterial.SetMatrix("_CameraMatrixVP", cameraVP);
-		rasterMaterial.SetInt("_VertexCount", vertexCount);
-		rasterMaterial.SetBuffer("_PrimitiveBuffer", primitiveBuffer);
-		rasterMaterial.SetBuffer("_IndexBuffer", indexBuffer);
-		// Enable debug wireframe mode
-		rasterMaterial.SetInt("_EnableWireframe", 1);
-		rasterMaterial.SetFloat("_WireWidth", 2.0f);
-		rasterMaterial.SetPass(0);
-		Graphics.DrawProceduralNow(MeshTopology.Triangles, triangleCount * 3);
+			Vector3 cameraPos = Camera.current.transform.position;
+			Matrix4x4 cameraVP = GL.GetGPUProjectionMatrix(Camera.current.projectionMatrix, true) * Camera.current.worldToCameraMatrix;
+			rasterMaterial.SetMatrix("_CameraMatrixVP", cameraVP);
+			rasterMaterial.SetInt("_VertexCount", vertexCount);
+			rasterMaterial.SetBuffer("_PrimitiveBuffer", primitiveBuffer);
+			rasterMaterial.SetBuffer("_IndexBuffer", indexBuffer);
+			// Enable debug wireframe mode
+			rasterMaterial.SetInt("_EnableWireframe", 1);
+			rasterMaterial.SetFloat("_WireWidth", 2.0f);
+			rasterMaterial.SetPass(0);
+			Graphics.DrawProceduralNow(MeshTopology.Triangles, triangleCount * 3);
+		}
+		else // step2
+		{
+			Material step2RasterMaterial = textureOptimizer.rasterMaterial;
+			// Only to render primitives in free view
+			if (step2RasterMaterial == null || Camera.current == cameraOptim || displayMode != DisplayMode.Optimization || separateFreeViewCamera == false)
+				return;
+
+			Matrix4x4 cameraVP = GL.GetGPUProjectionMatrix(Camera.current.projectionMatrix, true) * Camera.current.worldToCameraMatrix;
+			step2RasterMaterial.SetMatrix("_CameraMatrixVP", cameraVP);
+			step2RasterMaterial.SetTexture("_MainTex", textureOptimizer.albedoMap);
+			step2RasterMaterial.SetPass(0);
+			Graphics.DrawMeshNow(m, Matrix4x4.identity);
+		}
+
+	}
+	
+	
+	// Step2 only: Display the albedo texture
+	private void OnGUI()
+	{
+		if (step2 && textureOptimizer.albedoMap != null)
+		{
+			float width = 300;
+			float height = 300;
+			Rect rect = new Rect(10, Screen.height - height - 10, width, height);
+			Graphics.DrawTexture(rect, textureOptimizer.albedoMap);
+		}
 	}
 
 
-
-
 	// ======================= OPTIMIZATION =======================
-	// Su: 
 	public void RenderOptimizationSceneWithIDs(Camera cameraToUse, ComputeBuffer primitiveBufferToUse, RenderTexture renderTargetToUse, RenderTexture idRenderTargetToUse)
 	{
 		// Disable debug wireframe mode
@@ -502,8 +654,17 @@ public class StochasticOptimizer : MonoBehaviour
 	public void SetSharedComputeFrameParameters(ComputeShader computeShader)
 	{
 		// Set shared parameters
-		computeShader.SetInt("_VertexCount", vertexCount);
-		computeShader.SetInt("_PrimitiveCount", primitiveCount);
+		if (!step2) // step1
+		{
+			computeShader.SetInt("_VertexCount", vertexCount);
+			computeShader.SetInt("_SceneParametersCount", primitiveCount);
+			computeShader.SetFloat("_LearningRatePosition", learningRatePosition);
+		}
+		else // step2
+		{
+			computeShader.SetInt("_SceneParametersCount", textureOptimizer.texelCounts);
+		}
+
 		computeShader.SetInt("_CurrentOptimStep", currentOptimStep);
 		computeShader.SetInt("_OutputWidth", targetResolution.x);
 		computeShader.SetInt("_OutputHeight", targetResolution.y);
@@ -511,9 +672,7 @@ public class StochasticOptimizer : MonoBehaviour
 		computeShader.SetInt("_LossMode", lossMode == LossMode.L1 ? 0 : 1);
 		computeShader.SetFloat("_OptimizerBeta1", beta1);
 		computeShader.SetFloat("_OptimizerBeta2", beta2);
-		computeShader.SetInt("_ViewsPerOptimStep", viewsPerOptimStep);
 		computeShader.SetFloat("_DoAlphaLoss", doAlphaLoss ? 1.0f : 0.0f);
-		computeShader.SetFloat("_LearningRatePosition", learningRatePosition);
 		computeShader.SetFloat("_LearningRateColor", learningRateColor);
 	}
 
@@ -576,8 +735,6 @@ public class StochasticOptimizer : MonoBehaviour
 		renderedFrameMutatedMinus.enableRandomWrite = true;
 		renderedFrameMutatedPlus = new RenderTexture(targetResolution.x, targetResolution.y, 32, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
 		renderedFrameMutatedPlus.enableRandomWrite = true;
-		renderedFrameFreeView = new RenderTexture(targetResolution.x, targetResolution.y, 32, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
-		renderedFrameFreeView.enableRandomWrite = true;
 		targetFrameBuffer = new RenderTexture(targetResolution.x, targetResolution.y, 32, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
 
 		// Optim buffers
@@ -600,7 +757,7 @@ public class StochasticOptimizer : MonoBehaviour
 		ZeroInitBuffer(optimStepCounterBuffer);
 	}
 
-	private static void DispatchCompute1D(ComputeShader compute, int kernel, int threadCount, int groupSizeX)
+	public static void DispatchCompute1D(ComputeShader compute, int kernel, int threadCount, int groupSizeX)
 	{
 		int threadGroupCount = (int)math.ceil(threadCount / (float)groupSizeX);
 		int dispatchCount = (int)math.ceil(threadGroupCount / 65536.0f);
@@ -614,7 +771,7 @@ public class StochasticOptimizer : MonoBehaviour
 		}
 	}
 
-	public void ZeroInitBuffer(ComputeBuffer buffer)
+	public static void ZeroInitBuffer(ComputeBuffer buffer)
 	{
 		byte[] temp = new byte[buffer.count * buffer.stride];
 		buffer.SetData(temp);
@@ -633,7 +790,6 @@ public class StochasticOptimizer : MonoBehaviour
 		// The "triangles" below is actually the index buffer
 		//int[] triangles = init3DMesh.GetComponent<MeshFilter>().sharedMesh.triangles;
 		Vector3[] vertices;
-		int[] triangles;
 
 		IcosphereGenerator.Generate(
 			subdivision: 4,
@@ -645,6 +801,8 @@ public class StochasticOptimizer : MonoBehaviour
 		indexBuffer = new ComputeBuffer(triangles.Length, sizeof(int));
 		indexBuffer.SetData(triangles);
 		vertexCount = vertices.Length;
+		
+		Debug.Log("vertices: " + vertexCount + " triangles: " + triangleCount);
 		
 		int[] adjacency;
 		int[] adjacencyStart;
@@ -678,7 +836,7 @@ public class StochasticOptimizer : MonoBehaviour
 		for (int i = vertexCount; i < primitiveCount; i++)
 		{
 			//Color initColor = UnityEngine.Random.ColorHSV(0, 1, 0, 1);
-			Color initColor = Color.blue;
+			Color initColor = Color.white;
 			data[i] = new float3(initColor.r, initColor.g, initColor.b);
 		}
 		

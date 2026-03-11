@@ -1,0 +1,297 @@
+﻿#pragma enable_d3d11_debug_symbols
+
+#pragma kernel Reset
+#pragma kernel RandomPerturbation
+#pragma kernel GradientEstimation
+#pragma kernel GradientEstimationPost
+#pragma kernel GradientDescent
+
+// Optimizer parameters
+int _SceneParametersCount; // _SceneParametersCount = _AlbedoMap.width(512) * _AlbedoMap.height(512)
+int _OutputWidth;
+int _OutputHeight;
+int _OptimizerMode;
+int _LossMode;
+float _DoAlphaLoss;
+float _OptimizerBeta1;
+float _OptimizerBeta2;
+float _LearningRateColor;
+float _LambdaLap;
+float _Alpha;
+
+// Scene data + scene gradients
+RWTexture2D<float4> _AlbedoMap;
+RWTexture2D<float4> _AlbedoMapMutated;
+RWStructuredBuffer<int> _PrimitiveMutationError;
+RWStructuredBuffer<int3> _PrimitiveGradientsOptimStep;
+RWStructuredBuffer<float3> _PrimitiveGradientsMoments1;
+RWStructuredBuffer<float3> _PrimitiveGradientsMoments2;
+RWStructuredBuffer<int> _PrimitiveOptimStepCounter;
+
+// Render buffers
+Texture2D<float2> _UVBufferMutated;
+Texture2D<float4> _ResolvedFrameMutatedMinus;
+Texture2D<float4> _ResolvedFrameMutatedPlus;
+Texture2D<float4> _TargetTexture;
+SamplerState _LinearClampSampler;
+
+
+// Misc
+int _Dispatch1DOffset;
+int _CurrentView;
+int _CurrentOptimStep;
+float _IsAntitheticMutation;
+
+// Helpers
+uint WangHash(uint seed)
+{
+	// Actually PCG Hash
+	uint state = seed * 747796405u + 2891336453u;
+	uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+	return (word >> 22u) ^ word;
+}
+
+uint RandXorshift(inout uint rngState)
+{
+	// Actually PCG Hash
+	uint state = rngState;
+	rngState = rngState * 747796405u + 2891336453u;
+	uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+	return (word >> 22u) ^ word;
+}
+
+float GetRandomFloat(inout uint rngState)
+{
+	// -1/+1 mutations
+	uint rand = RandXorshift(rngState);
+	float res = float(rand) * (1.0 / 4294967296.0);
+	return res > 0.5 ? 1.0 : -1.0;
+
+	// Gaussian mutations
+	/*RandXorshift(rngState);
+	float res = float(rngState) * (1.0 / 4294967296.0);
+	return SampleNormalDistribution(res, 0.0, 1.0);*/
+
+	// Uniform mutations
+	/*RandXorshift(rngState);
+	float res = float(rngState) * (1.0 / 4294967296.0);
+	return res * 2.0 - 1.0;*/
+}
+
+// Kernels
+[numthreads(256, 1, 1)]
+void Reset(uint3 id : SV_DispatchThreadID)
+{
+	uint threadID = id.x + _Dispatch1DOffset;
+	if (threadID >= _SceneParametersCount)
+		return;
+	
+	// Reset primitive gradients
+	_PrimitiveGradientsOptimStep[threadID] = int3(0, 0, 0);
+
+	// Reset primitive error
+	_PrimitiveMutationError[threadID] = 0;
+}
+
+[numthreads(256, 1, 1)]
+void RandomPerturbation(uint3 id : SV_DispatchThreadID)
+{
+	uint threadID = id.x + _Dispatch1DOffset;
+	if (threadID >= _SceneParametersCount)
+		return;
+
+	uint rngState = WangHash((_CurrentView * _SceneParametersCount) + threadID);
+
+	// Get current primitive data
+	//float3 primitiveData = _PrimitiveBuffer[threadID];
+	uint width, height;
+	_AlbedoMap.GetDimensions(width, height); // width == height
+	uint2 coords = uint2(threadID % width, threadID / width);
+	float3 primitiveData = _AlbedoMap.Load(coords).rgb;
+	
+	// Create color mutation
+	float3 colorRandomMutation = float3(GetRandomFloat(rngState), GetRandomFloat(rngState), GetRandomFloat(rngState)) * (_IsAntitheticMutation > 0.5 ? -1.0 : 1.0);
+	colorRandomMutation *= _LearningRateColor;
+	primitiveData += colorRandomMutation;
+
+	// Clamp colors after mutation
+	primitiveData = clamp(primitiveData, 0.0, 1.0);
+	
+	// Store mutated primitive for rendering
+	//_PrimitiveBufferMutated[threadID] = primitiveData;
+	_AlbedoMapMutated[coords] = float4(primitiveData, 1.0f);
+}
+
+[numthreads(16, 16, 1)]
+void GradientEstimation(uint3 threadID : SV_DispatchThreadID)
+{
+	if (threadID.x >= _OutputWidth || threadID.y >= _OutputHeight)
+		return;
+
+	// Fetch target color
+	uint2 pixelCoord = threadID.xy;
+	float2 pixelUV = (pixelCoord + 0.5) / float2(_OutputWidth, _OutputHeight);
+	float4 targetColor = _TargetTexture.SampleLevel(_LinearClampSampler, pixelUV, 0);
+	targetColor.rgb = pow(targetColor.rgb, 1.0 / 2.2) * targetColor.a;
+
+	// Fetch mutated results (minus and plus antithetic mutations)
+	float4 colorRenderMinus = _ResolvedFrameMutatedMinus.SampleLevel(_LinearClampSampler, pixelUV, 0).rgba;
+	float4 colorRenderPlus = _ResolvedFrameMutatedPlus.SampleLevel(_LinearClampSampler, pixelUV, 0).rgba;
+	colorRenderMinus.rgb = pow(colorRenderMinus.rgb, 1.0 / 2.2) * colorRenderMinus.a;
+	colorRenderPlus.rgb = pow(colorRenderPlus.rgb, 1.0 / 2.2) * colorRenderPlus.a;
+
+	// Compute losses
+	float4 lossMinusRGBA = pow(abs(targetColor - colorRenderMinus), _LossMode == 1 ? 2.0 : 1.0);
+	float4 lossPlusRGBA = pow(abs(targetColor - colorRenderPlus), _LossMode == 1 ? 2.0 : 1.0);
+	float lossMinus = lossMinusRGBA.x + lossMinusRGBA.y + lossMinusRGBA.z + lossMinusRGBA.a * _DoAlphaLoss * 1;
+	float lossPlus = lossPlusRGBA.x + lossPlusRGBA.y + lossPlusRGBA.z + lossPlusRGBA.a * _DoAlphaLoss * 1;
+
+	// Loss difference
+	float lossDiffFloat = lossMinus - lossPlus;
+
+	// Quantize loss difference to integer for atomicAdd (floating point atomics not available in Unity)
+	int lossDiff = lossDiffFloat * 65536;
+	if (lossDiff == 0)
+		return;
+
+	// Accumulate loss for all primitives that contributed using both ID buffers, but avoid doing accumulating for same ID twice
+	uint width, height;
+	_AlbedoMap.GetDimensions(width, height); // width == height
+	
+	float2 uvBufferFetch = _UVBufferMutated[pixelCoord];
+	uint2 albedoMapCoords = uvBufferFetch * width;
+	int uvID = albedoMapCoords.y * width + albedoMapCoords.x;
+	if (uvID < _SceneParametersCount)
+	{
+		InterlockedAdd(_PrimitiveMutationError[uvID].x, lossDiff);
+	}
+
+	// 处理 plus mutation - 使用双线性插值分配梯度
+    // float2 uv = _UVBufferMutated[pixelCoord];
+    //
+    // // 检查UV是否有效
+    // if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0)
+    // {
+    //     // 转换为纹素坐标（浮点数）
+    //     float2 texelCoordFloat = uv * float2(width, height);
+    //     
+    //     // 获取四个相邻纹素的整数坐标
+    //     uint2 texelTopLeft = uint2(floor(texelCoordFloat.x), floor(texelCoordFloat.y));
+    //     uint2 texelTopRight = uint2(min(texelTopLeft.x + 1, width - 1), texelTopLeft.y);
+    //     uint2 texelBottomLeft = uint2(texelTopLeft.x, min(texelTopLeft.y + 1, height - 1));
+    //     uint2 texelBottomRight = uint2(min(texelTopLeft.x + 1, width - 1), min(texelTopLeft.y + 1, height - 1));
+    //     
+    //     // 计算权重
+    //     float2 fracUV = texelCoordFloat - floor(texelCoordFloat);
+    //     float wTL = (1.0 - fracUV.x) * (1.0 - fracUV.y);
+    //     float wTR = fracUV.x * (1.0 - fracUV.y);
+    //     float wBL = (1.0 - fracUV.x) * fracUV.y;
+    //     float wBR = fracUV.x * fracUV.y;
+    //     
+    //     // 将loss按权重分配给四个纹素
+    //     int primitiveTL = texelTopLeft.y * width + texelTopLeft.x;
+    //     int primitiveTR = texelTopRight.y * width + texelTopRight.x;
+    //     int primitiveBL = texelBottomLeft.y * width + texelBottomLeft.x;
+    //     int primitiveBR = texelBottomRight.y * width + texelBottomRight.x;
+    //     
+    //     if (primitiveTL < _SceneParametersCount && wTL > 0)
+    //         InterlockedAdd(_PrimitiveMutationError[primitiveTL].x, lossDiff * wTL);
+    //     
+    //     if (primitiveTR < _SceneParametersCount && wTR > 0 && primitiveTR != primitiveTL)
+    //         InterlockedAdd(_PrimitiveMutationError[primitiveTR].x, lossDiff * wTR);
+    //     
+    //     if (primitiveBL < _SceneParametersCount && wBL > 0 && primitiveBL != primitiveTL && primitiveBL != primitiveTR)
+    //         InterlockedAdd(_PrimitiveMutationError[primitiveBL].x, lossDiff * wBL);
+    //     
+    //     if (primitiveBR < _SceneParametersCount && wBR > 0 && primitiveBR != primitiveTL && primitiveBR != primitiveTR && primitiveBR != primitiveBL)
+    //         InterlockedAdd(_PrimitiveMutationError[primitiveBR].x, lossDiff * wBR);
+    // }
+	
+}
+
+[numthreads(256, 1, 1)]
+void GradientEstimationPost(uint3 id : SV_DispatchThreadID)
+{
+	uint threadID = id.x + _Dispatch1DOffset;
+	if (threadID >= _SceneParametersCount)
+		return;
+	
+	// Fetch Primitive loss
+	float lossDiff = _PrimitiveMutationError[threadID].x;
+	lossDiff /= 65536;
+
+	uint width, height;
+	_AlbedoMap.GetDimensions(width, height); // width == height
+	uint2 coords = uint2(threadID % width, threadID / width);
+	
+	float3 texelColor = _AlbedoMap.Load(coords).rgb;
+	float3 texelColorMutated = _AlbedoMapMutated.Load(coords).rgb;
+	float3 texelColorMutationGradients = _PrimitiveGradientsOptimStep[threadID];
+	texelColorMutationGradients /= 65536;
+	
+	float3 texelColorMutation = texelColorMutated - texelColor;
+	texelColorMutationGradients += texelColorMutation * lossDiff / 2.0;
+	int3 texelColorMutationGradientsInt = texelColorMutationGradients * 65536;
+	_PrimitiveGradientsOptimStep[threadID] = texelColorMutationGradientsInt;
+	
+	// Reset Primitive loss
+	_PrimitiveMutationError[threadID] = 0;
+}
+
+[numthreads(256, 1, 1)]
+void GradientDescent(uint3 id : SV_DispatchThreadID)
+{
+	uint threadID = id.x + _Dispatch1DOffset;
+	if (threadID >= _SceneParametersCount)
+		return;
+
+	uint width, height;
+	_AlbedoMap.GetDimensions(width, height); // width == height
+	uint2 coords = uint2(threadID % width, threadID / width);
+	
+	// Get data
+	uint primitiveID = threadID;
+	float3 primitiveData = _AlbedoMap.Load(coords).rgb;
+	float3 mutationGradients = _PrimitiveGradientsOptimStep[primitiveID];
+	mutationGradients /= 65536;
+	float3 gradientMoments1 = _PrimitiveGradientsMoments1[primitiveID];
+	float3 gradientMoments2 = _PrimitiveGradientsMoments2[primitiveID];
+
+	// Apply gradient descent
+	if (_OptimizerMode == 0) // RMS PROP
+	{
+		if (_CurrentOptimStep == 0)
+			return;
+		
+		// Descend color gradients
+		float3 colorGradient = mutationGradients;
+		gradientMoments1 = _OptimizerBeta1 * gradientMoments1 + (1.0 - _OptimizerBeta1) * (colorGradient * colorGradient);
+		primitiveData += _LearningRateColor * (colorGradient / (sqrt(gradientMoments1) + 1e-7));
+
+		// Clamp colors after gradient descent
+		primitiveData = clamp(primitiveData, 0.0, 1.0);
+	}
+	else // ADAM
+	{
+		int primitiveOptimStep = _PrimitiveOptimStepCounter[primitiveID];
+		
+		// Descend color gradients
+		float3 colorGradient = mutationGradients;
+		gradientMoments1 = _OptimizerBeta1 * gradientMoments1 + (1.0 - _OptimizerBeta1) * colorGradient;
+		gradientMoments2 = _OptimizerBeta2 * gradientMoments2 + (1.0 - _OptimizerBeta2) * (colorGradient * colorGradient);
+		float3 colorMoment1BiasCorrected = gradientMoments1 / (1.0 - pow(_OptimizerBeta1, primitiveOptimStep + 1));
+		float3 colorMoment2BiasCorrected = gradientMoments2 / (1.0 - pow(_OptimizerBeta2, primitiveOptimStep + 1));
+		primitiveData += _LearningRateColor * (colorMoment1BiasCorrected / (sqrt(colorMoment2BiasCorrected) + 1e-7));
+
+		// Clamp colors after gradient descent
+		primitiveData = clamp(primitiveData, 0.0, 1.0);
+		
+		// Update per-primitive step counter
+		_PrimitiveOptimStepCounter[primitiveID] = primitiveOptimStep + 1;
+	}
+
+	// Write results
+	_AlbedoMap[coords] = float4(primitiveData, 1.0f);
+	_PrimitiveGradientsMoments1[primitiveID] = gradientMoments1;
+	_PrimitiveGradientsMoments2[primitiveID] = gradientMoments2;
+}

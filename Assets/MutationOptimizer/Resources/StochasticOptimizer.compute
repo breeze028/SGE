@@ -1,4 +1,6 @@
-﻿#pragma kernel Reset
+﻿#pragma enable_d3d11_debug_symbols
+
+#pragma kernel Reset
 #pragma kernel RandomPerturbation
 #pragma kernel GradientEstimation
 #pragma kernel GradientEstimationPost
@@ -8,10 +10,9 @@
 
 // Optimizer parameters
 int _VertexCount;
-int _PrimitiveCount; // _PrimitiveCount = _VertexCount + _TriangleCount
+int _SceneParametersCount; // _SceneParametersCount = _VertexCount + _TriangleCount
 int _OutputWidth;
 int _OutputHeight;
-int _ViewsPerOptimStep;
 int _OptimizerMode;
 int _LossMode;
 float _DoAlphaLoss;
@@ -38,8 +39,6 @@ RWStructuredBuffer<float3> _PrimitiveGradientsMoments2;
 RWStructuredBuffer<int> _PrimitiveOptimStepCounter;
 
 // Render buffers
-RWTexture2D<float4> _DepthIDBufferRW;
-RWTexture2D<float4> _ResolvedFrameRW;
 Texture2D<float4> _IDBufferMutatedMinus;
 Texture2D<float4> _IDBufferMutatedPlus;
 Texture2D<float4> _ResolvedFrameMutatedMinus;
@@ -94,7 +93,7 @@ float GetRandomFloat(inout uint rngState)
 void Reset(uint3 id : SV_DispatchThreadID)
 {
 	uint threadID = id.x + _Dispatch1DOffset;
-	if (threadID >= _PrimitiveCount)
+	if (threadID >= _SceneParametersCount)
 		return;
 	
 	// Reset primitive gradients
@@ -108,10 +107,10 @@ void Reset(uint3 id : SV_DispatchThreadID)
 void RandomPerturbation(uint3 id : SV_DispatchThreadID)
 {
 	uint threadID = id.x + _Dispatch1DOffset;
-	if (threadID >= _PrimitiveCount)
+	if (threadID >= _SceneParametersCount)
 		return;
 
-	uint rngState = WangHash((_CurrentView * _PrimitiveCount) + threadID);
+	uint rngState = WangHash((_CurrentView * _SceneParametersCount) + threadID);
 
 	// Get current primitive data
 	float3 primitiveData = _PrimitiveBuffer[threadID];
@@ -173,12 +172,12 @@ void GradientEstimation(uint3 threadID : SV_DispatchThreadID)
 	// Accumulate loss for all primitives that contributed using both ID buffers, but avoid doing accumulating for same ID twice
 	float4 idBufferFetch = _IDBufferMutatedPlus[pixelCoord];
 	int primitiveIDPlus = asuint(idBufferFetch.r);
-	if (primitiveIDPlus < _PrimitiveCount - _VertexCount)
+	if (primitiveIDPlus < _SceneParametersCount - _VertexCount)
 		InterlockedAdd(_PrimitiveMutationError[primitiveIDPlus].x, lossDiff);
 
 	idBufferFetch = _IDBufferMutatedMinus[pixelCoord];
 	int primitiveIDMinus = asuint(idBufferFetch.r);
-	if (primitiveIDMinus < _PrimitiveCount - _VertexCount && primitiveIDMinus != primitiveIDPlus)
+	if (primitiveIDMinus < _SceneParametersCount - _VertexCount && primitiveIDMinus != primitiveIDPlus)
 		InterlockedAdd(_PrimitiveMutationError[primitiveIDMinus].x, lossDiff);
 }
 
@@ -186,7 +185,7 @@ void GradientEstimation(uint3 threadID : SV_DispatchThreadID)
 void GradientEstimationPost(uint3 id : SV_DispatchThreadID)
 {
 	uint threadID = id.x + _Dispatch1DOffset;
-	if (threadID >= _PrimitiveCount)
+	if (threadID >= _SceneParametersCount)
 		return;
 	
 	if (threadID < _VertexCount)
@@ -250,6 +249,7 @@ void GradientEstimationPost(uint3 id : SV_DispatchThreadID)
 		float3 primitiveColorMutated = _PrimitiveBufferMutated[primitiveColorID];
 		float3 primitiveColorMutationGradients = _PrimitiveGradientsOptimStep[primitiveColorID];
 		primitiveColorMutationGradients /= 65536;
+		//float3 primitiveColorMutationGradients = 0;
 	
 		float3 primitiveColorMutation = primitiveColorMutated - primitiveColor;
 		primitiveColorMutationGradients += primitiveColorMutation * lossDiff / 2.0;
@@ -265,7 +265,7 @@ void GradientEstimationPost(uint3 id : SV_DispatchThreadID)
 void InitJacobiGradient(uint3 id : SV_DispatchThreadID)
 {
 	uint v = id.x;
-	if (v >= _PrimitiveCount) return;
+	if (v >= _SceneParametersCount) return;
 
 	_JacobiGradientsIn[v] = _PrimitiveGradientsOptimStep[v];
 }
@@ -314,7 +314,7 @@ void GradientPrecondition(uint3 id : SV_DispatchThreadID)
 void GradientDescent(uint3 id : SV_DispatchThreadID)
 {
 	uint threadID = id.x + _Dispatch1DOffset;
-	if (threadID >= _PrimitiveCount)
+	if (threadID >= _SceneParametersCount)
 		return;
 
 	// Get data
