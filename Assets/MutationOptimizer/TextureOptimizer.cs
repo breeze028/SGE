@@ -123,7 +123,7 @@ public class TextureOptimizer
         albedoMap = new RenderTexture(white.width, white.height, 0, RenderTextureFormat.ARGB32);
         albedoMap.enableRandomWrite = true;
         albedoMap.autoGenerateMips = true;
-        albedoMap.filterMode = FilterMode.Trilinear;
+        albedoMap.filterMode = FilterMode.Point;
         albedoMap.Create();
         Graphics.Blit(white, albedoMap);
         texelCounts = albedoMap.width * albedoMap.height;
@@ -131,7 +131,7 @@ public class TextureOptimizer
         albedoMapMutated = new RenderTexture(white.width, white.height, 0, RenderTextureFormat.ARGB32);
         albedoMapMutated.enableRandomWrite = true;
         albedoMapMutated.autoGenerateMips = true;
-        albedoMapMutated.filterMode = FilterMode.Trilinear;
+        albedoMapMutated.filterMode = FilterMode.Point;
         albedoMapMutated.Create();
         
         // Init everything
