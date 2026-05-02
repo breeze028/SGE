@@ -116,7 +116,7 @@ public class TextureOptimizer
 
     public void InitResources()
     {
-        ReleaseReources();
+        ReleaseResources();
         
         // Init albedoMap
         Texture2D white = Resources.Load<Texture2D>("1024");
@@ -154,22 +154,23 @@ public class TextureOptimizer
         StochasticOptimizer.ZeroInitBuffer(optimStepCounterBuffer);
     }
 
-    public void ReleaseReources()
+    public void ReleaseResources()
     {
-        if (uvBufferMutated != null)
-            uvBufferMutated.Release();
-        if (primitiveBufferMutated != null)
-            primitiveBufferMutated.Release();
-        if (optimStepGradientsBuffer != null)
-            optimStepGradientsBuffer.Release();
-        if (optimStepMutationError != null)
-            optimStepMutationError.Release();
-        if (gradientMoments1Buffer != null)
-            gradientMoments1Buffer.Release();
-        if (gradientMoments2Buffer != null)
-            gradientMoments2Buffer.Release();
-        if (optimStepCounterBuffer != null)
-            optimStepCounterBuffer.Release();
+        StochasticOptimizer.SafeRelease(ref uvBufferMutated);
+        StochasticOptimizer.SafeRelease(ref primitiveBufferMutated);
+        StochasticOptimizer.SafeRelease(ref optimStepGradientsBuffer);
+        StochasticOptimizer.SafeRelease(ref optimStepMutationError);
+        StochasticOptimizer.SafeRelease(ref gradientMoments1Buffer);
+        StochasticOptimizer.SafeRelease(ref gradientMoments2Buffer);
+        StochasticOptimizer.SafeRelease(ref optimStepCounterBuffer);
     }
-    
+
+    public void ReleaseAllResources()
+    {
+        ReleaseResources();
+        StochasticOptimizer.SafeRelease(ref albedoMap);
+        StochasticOptimizer.SafeRelease(ref albedoMapMutated);
+        StochasticOptimizer.SafeDestroy(ref rasterMaterial);
+    }
+
 }

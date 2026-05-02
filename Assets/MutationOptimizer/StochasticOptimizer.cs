@@ -9,7 +9,9 @@ using Unity.Burst;
 using Unity.Collections;
 using Unity.Jobs;
 using Unity.Mathematics;
+#if UNITY_EDITOR
 using UnityEditor;
+#endif
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Profiling;
@@ -260,7 +262,11 @@ public class StochasticOptimizer : MonoBehaviour
 		m.triangles = newTriangles;
 		m.RecalculateNormals();
 		
+#if UNITY_EDITOR
 		Unwrapping.GenerateSecondaryUVSet(m);
+#else
+		Debug.LogWarning("Runtime UV unwrapping is not implemented. Provide uv2 before entering step2 in Player builds.");
+#endif
 		
 		// Get mesh's data for step2
 		textureOptimizer = new TextureOptimizer(targetResolution);
@@ -356,93 +362,49 @@ public class StochasticOptimizer : MonoBehaviour
 	{
 		ReleaseEverything();
 		if (textureOptimizer != null)
-			textureOptimizer.ReleaseReources();
+			textureOptimizer.ReleaseAllResources();
 	}
 
 	void ReleaseEverything()
 	{
-		if (rasterMaterial != null)
-		{
-			if (Application.isPlaying)
-			{
-				Destroy(rasterMaterial);
-			}
-			else
-			{
-				DestroyImmediate(rasterMaterial);
-			}
-		}
-
-		if (primitiveBuffer != null)
-			primitiveBuffer.Release();
-		primitiveBuffer = null;
-		if (indexBuffer != null)
-			indexBuffer.Release();
-		indexBuffer = null;
-		if (AdjacencyBuffer != null)
-			AdjacencyBuffer.Release();
-		AdjacencyBuffer = null;
-		if (AdjacencyStartBuffer != null)
-			AdjacencyStartBuffer.Release();
-		AdjacencyStartBuffer = null;
-		if (AdjacencyCountBuffer != null)
-			AdjacencyCountBuffer.Release();
-		AdjacencyCountBuffer = null;
+		SafeDestroy(ref rasterMaterial);
+		SafeRelease(ref primitiveBuffer);
+		SafeRelease(ref indexBuffer);
+		SafeRelease(ref AdjacencyBuffer);
+		SafeRelease(ref AdjacencyStartBuffer);
+		SafeRelease(ref AdjacencyCountBuffer);
 		ReleaseOptimBuffers();
 	}
 
 	void ReleaseStepOneOptimBuffers()
 	{
-		if (primitiveBufferMutated != null)
-			primitiveBufferMutated.Release();
-		if (idBufferMutatedPlus != null)
-			idBufferMutatedPlus.Release();
-		if (idBufferMutatedMinus != null)
-			idBufferMutatedMinus.Release();
-		if (optimStepGradientsBuffer != null)
-			optimStepGradientsBuffer.Release();
-		if (jacobiGradientsInBuffer != null)
-			jacobiGradientsInBuffer.Release();
-		if (jacobiGradientsOutBuffer != null)
-			jacobiGradientsOutBuffer.Release();
-		if (optimStepMutationError != null)
-			optimStepMutationError.Release();
-		if (gradientMoments1Buffer != null)
-			gradientMoments1Buffer.Release();
-		if (gradientMoments2Buffer != null)
-			gradientMoments2Buffer.Release();
-		if (optimStepCounterBuffer != null)
-			optimStepCounterBuffer.Release();
+		SafeRelease(ref primitiveBufferMutated);
+		SafeRelease(ref idBufferMutatedPlus);
+		SafeRelease(ref idBufferMutatedMinus);
+		SafeRelease(ref optimStepGradientsBuffer);
+		SafeRelease(ref jacobiGradientsInBuffer);
+		SafeRelease(ref jacobiGradientsOutBuffer);
+		SafeRelease(ref optimStepMutationError);
+		SafeRelease(ref gradientMoments1Buffer);
+		SafeRelease(ref gradientMoments2Buffer);
+		SafeRelease(ref optimStepCounterBuffer);
 	}
 
 	void ReleaseOptimBuffers()
 	{
-		if (primitiveBufferMutated != null)
-			primitiveBufferMutated.Release();
-		if (idBufferMutatedPlus != null)
-			idBufferMutatedPlus.Release();
-		if (idBufferMutatedMinus != null)
-			idBufferMutatedMinus.Release();
-		if (renderedFrameMutatedMinus != null)
-			renderedFrameMutatedMinus.Release();
-		if (renderedFrameMutatedPlus != null)
-			renderedFrameMutatedPlus.Release();
-		if (optimStepGradientsBuffer != null)
-			optimStepGradientsBuffer.Release();
-		if (jacobiGradientsInBuffer != null)
-			jacobiGradientsInBuffer.Release();
-		if (jacobiGradientsOutBuffer != null)
-			jacobiGradientsOutBuffer.Release();
-		if (optimStepMutationError != null)
-			optimStepMutationError.Release();
-		if (gradientMoments1Buffer != null)
-			gradientMoments1Buffer.Release();
-		if (gradientMoments2Buffer != null)
-			gradientMoments2Buffer.Release();
-		if (optimStepCounterBuffer != null)
-			optimStepCounterBuffer.Release();
-		if (targetFrameBuffer != null)
-			targetFrameBuffer.Release();
+		SafeRelease(ref primitiveBufferMutated);
+		SafeRelease(ref idBufferMutatedPlus);
+		SafeRelease(ref idBufferMutatedMinus);
+		SafeRelease(ref renderedFrameMutatedMinus);
+		SafeRelease(ref renderedFrameMutatedPlus);
+		SafeRelease(ref optimStepGradientsBuffer);
+		SafeRelease(ref jacobiGradientsInBuffer);
+		SafeRelease(ref jacobiGradientsOutBuffer);
+		SafeRelease(ref optimStepMutationError);
+		SafeRelease(ref gradientMoments1Buffer);
+		SafeRelease(ref gradientMoments2Buffer);
+		SafeRelease(ref optimStepCounterBuffer);
+		SafeRelease(ref targetFrameBuffer);
 	}
 	
 	// Display the result. The wireframe will be enabled. This stage has nothing to do with the optimization.
@@ -527,6 +489,7 @@ public class StochasticOptimizer : MonoBehaviour
 
 	public void ResetOptimizationStep()
 	{
+		stochasticOptimizerCS.SetInt("_MutationErrorCount", triangleCount);
 		stochasticOptimizerCS.SetBuffer(kernelReset, "_PrimitiveGradientsOptimStep", optimStepGradientsBuffer);
 		stochasticOptimizerCS.SetBuffer(kernelReset, "_PrimitiveMutationError", optimStepMutationError);
 		DispatchCompute1D(stochasticOptimizerCS, kernelReset, primitiveBuffer.count, 256);
@@ -775,6 +738,36 @@ public class StochasticOptimizer : MonoBehaviour
 	{
 		byte[] temp = new byte[buffer.count * buffer.stride];
 		buffer.SetData(temp);
+	}
+
+	public static void SafeRelease(ref ComputeBuffer buffer)
+	{
+		if (buffer == null)
+			return;
+
+		buffer.Release();
+		buffer = null;
+	}
+
+	public static void SafeRelease(ref RenderTexture renderTexture)
+	{
+		if (renderTexture == null)
+			return;
+
+		renderTexture.Release();
+		renderTexture = null;
+	}
+
+	public static void SafeDestroy(ref Material material)
+	{
+		if (material == null)
+			return;
+
+		if (Application.isPlaying)
+			Destroy(material);
+		else
+			DestroyImmediate(material);
+		material = null;
 	}
 
 

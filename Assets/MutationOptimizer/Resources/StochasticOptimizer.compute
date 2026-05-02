@@ -11,6 +11,7 @@
 // Optimizer parameters
 int _VertexCount;
 int _SceneParametersCount; // _SceneParametersCount = _VertexCount + _TriangleCount
+int _MutationErrorCount;
 int _OutputWidth;
 int _OutputHeight;
 int _OptimizerMode;
@@ -100,7 +101,8 @@ void Reset(uint3 id : SV_DispatchThreadID)
 	_PrimitiveGradientsOptimStep[threadID] = int3(0, 0, 0);
 
 	// Reset primitive error
-	_PrimitiveMutationError[threadID] = 0;
+	if (threadID < _MutationErrorCount)
+		_PrimitiveMutationError[threadID] = 0;
 }
 
 [numthreads(256, 1, 1)]
