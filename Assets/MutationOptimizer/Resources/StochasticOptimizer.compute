@@ -16,6 +16,7 @@ int _OutputWidth;
 int _OutputHeight;
 int _OptimizerMode;
 int _LossMode;
+int _RegularizationMode;
 float _DoAlphaLoss;
 float _OptimizerBeta1;
 float _OptimizerBeta2;
@@ -192,32 +193,35 @@ void GradientEstimationPost(uint3 id : SV_DispatchThreadID)
 	
 	if (threadID < _VertexCount)
 	{
-		// uint vertexID = threadID;
-		// float3 vertexPosition = _PrimitiveBuffer[vertexID];
-		// // float3 vertexPositionMutationGradients = _PrimitiveGradientsOptimStep[vertexID];
-		// // vertexPositionMutationGradients /= 65536;
-		// float3 vertexPositionMutationGradients = 0;
-		//
-		// int adjacencyVertexStart = _AdjacencyStartBuffer[vertexID];
-		// int adjacencyVertexCount = _AdjacencyCountBuffer[vertexID];
-		//
-		// float3 meanVertexPosition = 0;
-		// for (int k = 0; k < adjacencyVertexCount; k++)
-		// {
-		// 	int adjacencyVertex = _AdjacencyBuffer[adjacencyVertexStart + k];
-		// 	float3 adjacencyVertexPosition = _PrimitiveBuffer[adjacencyVertex];
-		// 	meanVertexPosition += adjacencyVertexPosition;
-		// }
-		// meanVertexPosition /= adjacencyVertexCount;
-		//
-		// //float3 lap = vertexPosition - meanVertexPosition;
-		// float3 lap = meanVertexPosition - vertexPosition;
-		// vertexPositionMutationGradients += 2.0 * _LambdaLap * lap;
-		//
-		// int3 vertexPositionMutationGradientsInt = vertexPositionMutationGradients * 65536;
-		// InterlockedAdd(_PrimitiveGradientsOptimStep[vertexID].x, vertexPositionMutationGradientsInt.x);
-		// InterlockedAdd(_PrimitiveGradientsOptimStep[vertexID].y, vertexPositionMutationGradientsInt.y);
-		// InterlockedAdd(_PrimitiveGradientsOptimStep[vertexID].z, vertexPositionMutationGradientsInt.z);
+		if (_RegularizationMode == 1)
+		{
+			uint vertexID = threadID;
+			float3 vertexPosition = _PrimitiveBuffer[vertexID];
+			float3 vertexPositionMutationGradients = 0;
+
+			int adjacencyVertexStart = _AdjacencyStartBuffer[vertexID];
+			int adjacencyVertexCount = _AdjacencyCountBuffer[vertexID];
+
+			float3 meanVertexPosition = 0;
+			for (int k = 0; k < adjacencyVertexCount; k++)
+			{
+				int adjacencyVertex = _AdjacencyBuffer[adjacencyVertexStart + k];
+				float3 adjacencyVertexPosition = _PrimitiveBuffer[adjacencyVertex];
+				meanVertexPosition += adjacencyVertexPosition;
+			}
+
+			if (adjacencyVertexCount > 0)
+			{
+				meanVertexPosition /= adjacencyVertexCount;
+				float3 lap = meanVertexPosition - vertexPosition;
+				vertexPositionMutationGradients += 2.0 * _LambdaLap * lap;
+
+				int3 vertexPositionMutationGradientsInt = vertexPositionMutationGradients * 65536;
+				InterlockedAdd(_PrimitiveGradientsOptimStep[vertexID].x, vertexPositionMutationGradientsInt.x);
+				InterlockedAdd(_PrimitiveGradientsOptimStep[vertexID].y, vertexPositionMutationGradientsInt.y);
+				InterlockedAdd(_PrimitiveGradientsOptimStep[vertexID].z, vertexPositionMutationGradientsInt.z);
+			}
+		}
 	}
 	else
 	{

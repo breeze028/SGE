@@ -50,6 +50,12 @@ public class StochasticOptimizer : MonoBehaviour
 	private Stopwatch systemTimer = new Stopwatch();
 	private int vertexCount;
 	private int triangleCount;
+	private bool fixedViewInitialized;
+	private Vector3 fixedViewPosition;
+	private Quaternion fixedViewRotation;
+	private bool fixedViewOrthographic;
+	private float fixedViewOrthographicSize;
+	private float fixedViewFieldOfView;
 
 	// Compute kernels
 	private int kernelReset;
@@ -78,6 +84,8 @@ public class StochasticOptimizer : MonoBehaviour
 
 	public Optimizer optimizer = Optimizer.Adam;
 	public LossMode lossMode = LossMode.L2;
+	public ViewMode viewMode = ViewMode.RandomMultiView;
+	public RegularizationMode regularizationMode = RegularizationMode.GradientPrecondition;
 	public bool doAlphaLoss = true;
 	public int viewsPerOptimStep = 1;
 	public bool optimizeColorsSeparately = false;
@@ -86,7 +94,8 @@ public class StochasticOptimizer : MonoBehaviour
 	[Range(0.0f, 1.0f)] public float beta2 = 0.999f;
 	[LogarithmicRange(0.0f, 0.001f, 1.0f)] public float learningRatePosition = 0.01f;
 	[LogarithmicRange(0.0f, 0.001f, 1.0f)] public float learningRateColor = 0.01f;
-	[LogarithmicRange(0.0f, 0.001f, 1.0f)] public float lambdaLap = 0.01f;
+	[LogarithmicRange(0.0f, 0.000001f, 0.1f)] public float explicitLaplacianLambda = 0.0001f;
+	[LogarithmicRange(0.0f, 0.001f, 1.0f)] public float gradientPreconditionLambda = 0.01f;
 
 	public float millisecondsPerOptimStep = 0.0f;
 	public float totalElapsedSeconds = 0.0f;
@@ -184,7 +193,7 @@ public class StochasticOptimizer : MonoBehaviour
 		{
 			// Set up new view point
 			stochasticOptimizerCS.SetInt("_CurrentView", currentViewPoint);
-			RandomizeCameraView();
+			SetupOptimizationCameraView();
 			cameraOptim.Render();
 
 			// We do this next part twice if we want to optimize positions and colors separately, only once otherwise
@@ -294,7 +303,7 @@ public class StochasticOptimizer : MonoBehaviour
 		{
 			// Set up new view point
 			textureOptimizer.textureOptimizerCS.SetInt("_CurrentView", currentViewPoint);
-			RandomizeCameraView();
+			SetupOptimizationCameraView();
 			cameraOptim.Render();
 			
 			// Minus Epsilon
@@ -507,7 +516,8 @@ public class StochasticOptimizer : MonoBehaviour
 		stochasticOptimizerCS.Dispatch(kernelGradientEstimation, (int)math.ceil(targetResolution.x / 16.0f), (int)math.ceil(targetResolution.y / 16.0f), 1);
 
 		// Accumulate gradients
-		stochasticOptimizerCS.SetFloat("_LambdaLap", lambdaLap);
+		stochasticOptimizerCS.SetInt("_RegularizationMode", (int)regularizationMode);
+		stochasticOptimizerCS.SetFloat("_LambdaLap", explicitLaplacianLambda);
 		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_IndexBuffer", indexBuffer);
 		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_AdjacencyBuffer", AdjacencyBuffer);
 		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_AdjacencyStartBuffer", AdjacencyStartBuffer);
@@ -518,36 +528,40 @@ public class StochasticOptimizer : MonoBehaviour
 		stochasticOptimizerCS.SetBuffer(kernelGradientEstimationPost, "_PrimitiveGradientsOptimStep", optimStepGradientsBuffer);
 		DispatchCompute1D(stochasticOptimizerCS, kernelGradientEstimationPost, primitiveCount, 256);
 		
-		// Init ping-pong buffer
-		stochasticOptimizerCS.SetBuffer(kernelInitJacobiGradient, "_PrimitiveGradientsOptimStep", optimStepGradientsBuffer);
-		stochasticOptimizerCS.SetBuffer(kernelInitJacobiGradient, "_JacobiGradientsIn", jacobiGradientsInBuffer);
-		DispatchCompute1D(stochasticOptimizerCS, kernelInitJacobiGradient, primitiveCount, 256);
-		
-		// Gradient Precondition
-		stochasticOptimizerCS.SetFloat("_Alpha", 0.002f);
-		stochasticOptimizerCS.SetFloat("_LambdaLap", lambdaLap);
-		stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_PrimitiveGradientsOptimStep", optimStepGradientsBuffer);
-		stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_AdjacencyBuffer", AdjacencyBuffer);
-		stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_AdjacencyStartBuffer", AdjacencyStartBuffer);
-		stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_AdjacencyCountBuffer", AdjacencyCountBuffer);
-		for (int k = 0; k < 15; k++)
+		if (regularizationMode == RegularizationMode.GradientPrecondition)
 		{
-			stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_JacobiGradientsIn", jacobiGradientsInBuffer);
-			stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_JacobiGradientsOut", jacobiGradientsOutBuffer);
-			DispatchCompute1D(stochasticOptimizerCS, kernelGradientPrecondition, vertexCount, 256);
+			// Init ping-pong buffer
+			stochasticOptimizerCS.SetBuffer(kernelInitJacobiGradient, "_PrimitiveGradientsOptimStep", optimStepGradientsBuffer);
+			stochasticOptimizerCS.SetBuffer(kernelInitJacobiGradient, "_JacobiGradientsIn", jacobiGradientsInBuffer);
+			DispatchCompute1D(stochasticOptimizerCS, kernelInitJacobiGradient, primitiveCount, 256);
 			
-			stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_JacobiGradientsIn", jacobiGradientsOutBuffer);
-			stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_JacobiGradientsOut", jacobiGradientsInBuffer);
-			DispatchCompute1D(stochasticOptimizerCS, kernelGradientPrecondition, vertexCount, 256);
+			// Gradient Precondition
+			stochasticOptimizerCS.SetFloat("_Alpha", 0.002f);
+			stochasticOptimizerCS.SetFloat("_LambdaLap", gradientPreconditionLambda);
+			stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_PrimitiveGradientsOptimStep", optimStepGradientsBuffer);
+			stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_AdjacencyBuffer", AdjacencyBuffer);
+			stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_AdjacencyStartBuffer", AdjacencyStartBuffer);
+			stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_AdjacencyCountBuffer", AdjacencyCountBuffer);
+			for (int k = 0; k < 15; k++)
+			{
+				stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_JacobiGradientsIn", jacobiGradientsInBuffer);
+				stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_JacobiGradientsOut", jacobiGradientsOutBuffer);
+				DispatchCompute1D(stochasticOptimizerCS, kernelGradientPrecondition, vertexCount, 256);
+				
+				stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_JacobiGradientsIn", jacobiGradientsOutBuffer);
+				stochasticOptimizerCS.SetBuffer(kernelGradientPrecondition, "_JacobiGradientsOut", jacobiGradientsInBuffer);
+				DispatchCompute1D(stochasticOptimizerCS, kernelGradientPrecondition, vertexCount, 256);
+			}
 		}
 	}
 
 	public void DoGradientDescent()
 	{
+		ComputeBuffer gradientBuffer = regularizationMode == RegularizationMode.GradientPrecondition ? jacobiGradientsInBuffer : optimStepGradientsBuffer;
 		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveBuffer", primitiveBuffer);
 		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveGradientsMoments1", gradientMoments1Buffer);
 		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveGradientsMoments2", gradientMoments2Buffer);
-		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveGradientsOptimStep", jacobiGradientsInBuffer);
+		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveGradientsOptimStep", gradientBuffer);
 		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveOptimStepCounter", optimStepCounterBuffer);
 		stochasticOptimizerCS.SetBuffer(kernelGradientDescent, "_PrimitiveMutationError", optimStepMutationError);
 		DispatchCompute1D(stochasticOptimizerCS, kernelGradientDescent, primitiveBuffer.count, 256);
@@ -649,6 +663,38 @@ public class StochasticOptimizer : MonoBehaviour
 		cameraOptim.transform.LookAt(lookAtCenter, UnityEngine.Random.onUnitSphere);
 	}
 
+	public void SetupOptimizationCameraView()
+	{
+		if (viewMode == ViewMode.RandomMultiView)
+		{
+			RandomizeCameraView();
+			return;
+		}
+
+		if (!fixedViewInitialized)
+			CaptureFixedView(cameraDisplay);
+
+		ApplyFixedView();
+	}
+
+	public void CaptureFixedView(Camera sourceCamera)
+	{
+		fixedViewPosition = sourceCamera.transform.position;
+		fixedViewRotation = sourceCamera.transform.rotation;
+		fixedViewOrthographic = sourceCamera.orthographic;
+		fixedViewOrthographicSize = sourceCamera.orthographicSize;
+		fixedViewFieldOfView = sourceCamera.fieldOfView;
+		fixedViewInitialized = true;
+	}
+
+	public void ApplyFixedView()
+	{
+		cameraOptim.transform.SetPositionAndRotation(fixedViewPosition, fixedViewRotation);
+		cameraOptim.orthographic = fixedViewOrthographic;
+		cameraOptim.orthographicSize = fixedViewOrthographicSize;
+		cameraOptim.fieldOfView = fixedViewFieldOfView;
+	}
+
 	public void ResetEverything()
 	{
 		OnDisable();
@@ -677,6 +723,7 @@ public class StochasticOptimizer : MonoBehaviour
 
 		currentOptimStep = 0;
 		currentViewPoint = 0;
+		fixedViewInitialized = false;
 		totalElapsedSeconds = 0.0f;
 		systemTimer.Restart();
 	}
@@ -850,6 +897,19 @@ public class StochasticOptimizer : MonoBehaviour
 	{
 		L1,
 		L2
+	}
+
+	public enum ViewMode
+	{
+		RandomMultiView,
+		FixedView
+	}
+
+	public enum RegularizationMode
+	{
+		None,
+		ExplicitLaplacian,
+		GradientPrecondition
 	}
 
 	public enum Optimizer

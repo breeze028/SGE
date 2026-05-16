@@ -23,10 +23,13 @@ public class StochasticOptimizerEditor : Editor
 
 	SerializedProperty optimizer;
 	SerializedProperty lossMode;
+	SerializedProperty viewMode;
+	SerializedProperty regularizationMode;
 	SerializedProperty doAlphaLoss;
 	SerializedProperty viewsPerOptimStep;
 	SerializedProperty optimizeColorsSeparately;
-	SerializedProperty lambdaLap;
+	SerializedProperty explicitLaplacianLambda;
+	SerializedProperty gradientPreconditionLambda;
 
 	SerializedProperty beta1;
 	SerializedProperty beta2;
@@ -53,10 +56,13 @@ public class StochasticOptimizerEditor : Editor
 
 		optimizer = serializedObject.FindProperty("optimizer");
 		lossMode = serializedObject.FindProperty("lossMode");
+		viewMode = serializedObject.FindProperty("viewMode");
+		regularizationMode = serializedObject.FindProperty("regularizationMode");
 		doAlphaLoss = serializedObject.FindProperty("doAlphaLoss");
 		viewsPerOptimStep = serializedObject.FindProperty("viewsPerOptimStep");
 		optimizeColorsSeparately = serializedObject.FindProperty("optimizeColorsSeparately");
-		lambdaLap = serializedObject.FindProperty("lambdaLap");
+		explicitLaplacianLambda = serializedObject.FindProperty("explicitLaplacianLambda");
+		gradientPreconditionLambda = serializedObject.FindProperty("gradientPreconditionLambda");
 
 		beta1 = serializedObject.FindProperty("beta1");
 		beta2 = serializedObject.FindProperty("beta2");
@@ -110,10 +116,13 @@ public class StochasticOptimizerEditor : Editor
 		EditorGUILayout.LabelField("Optimizer Settings", EditorStyles.boldLabel);
 		EditorGUILayout.PropertyField(optimizer);
 		EditorGUILayout.PropertyField(lossMode);
+		EditorGUILayout.PropertyField(viewMode);
+		EditorGUILayout.PropertyField(regularizationMode);
 		EditorGUILayout.PropertyField(doAlphaLoss);
 		EditorGUILayout.PropertyField(viewsPerOptimStep);
 		EditorGUILayout.PropertyField(optimizeColorsSeparately);
-		EditorGUILayout.PropertyField(lambdaLap);
+		EditorGUILayout.PropertyField(explicitLaplacianLambda);
+		EditorGUILayout.PropertyField(gradientPreconditionLambda);
 
 		// Optimizer controls
 		EditorGUILayout.Space();
