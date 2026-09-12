@@ -68,6 +68,65 @@ public static class IcosphereGenerator
         triangles = triList.ToArray();
     }
 
+    public static void GenerateTorus(
+        int majorSegments,
+        int minorSegments,
+        float majorRadius,
+        float minorRadius,
+        out Vector3[] vertices,
+        out int[] triangles)
+    {
+        majorSegments = Mathf.Max(majorSegments, 3);
+        minorSegments = Mathf.Max(minorSegments, 3);
+        majorRadius = Mathf.Max(majorRadius, 0.0001f);
+        minorRadius = Mathf.Max(minorRadius, 0.0001f);
+
+        vertices = new Vector3[majorSegments * minorSegments];
+        triangles = new int[majorSegments * minorSegments * 6];
+
+        for (int i = 0; i < majorSegments; i++)
+        {
+            float u = i / (float)majorSegments * Mathf.PI * 2.0f;
+            float cosU = Mathf.Cos(u);
+            float sinU = Mathf.Sin(u);
+
+            for (int j = 0; j < minorSegments; j++)
+            {
+                float v = j / (float)minorSegments * Mathf.PI * 2.0f;
+                float tubeRadius = majorRadius + minorRadius * Mathf.Cos(v);
+                float y = minorRadius * Mathf.Sin(v);
+
+                vertices[i * minorSegments + j] = new Vector3(
+                    tubeRadius * cosU,
+                    y,
+                    tubeRadius * sinU);
+            }
+        }
+
+        int tri = 0;
+        for (int i = 0; i < majorSegments; i++)
+        {
+            int nextI = (i + 1) % majorSegments;
+            for (int j = 0; j < minorSegments; j++)
+            {
+                int nextJ = (j + 1) % minorSegments;
+
+                int a = i * minorSegments + j;
+                int b = nextI * minorSegments + j;
+                int c = nextI * minorSegments + nextJ;
+                int d = i * minorSegments + nextJ;
+
+                triangles[tri++] = a;
+                triangles[tri++] = b;
+                triangles[tri++] = c;
+
+                triangles[tri++] = a;
+                triangles[tri++] = c;
+                triangles[tri++] = d;
+            }
+        }
+    }
+
     public static void GetAdjacency(
         Vector3[] vertices,
         int[] triangles,

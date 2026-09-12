@@ -1,0 +1,24 @@
+{
+    "name": "UnityGLTF.Interactivity.VisualScripting.Runtime",
+    "rootNamespace": "",
+    "references": [
+        "GUID:18d18f811ba286c49814567a3cfba688"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "HAVE_VISUAL_SCRIPTING"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.unity.visualscripting",
+            "expression": "1.9",
+            "define": "HAVE_VISUAL_SCRIPTING"
+        }
+    ],
+    "noEngineReferences": false
+}

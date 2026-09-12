@@ -1,0 +1,25 @@
+{
+    "name": "UnityGLTF.Interactivity.VisualScripting.ExportPlugin",
+    "rootNamespace": "",
+    "references": [
+        "GUID:d4cf44f888f7eac4e8981a7d5efb492d",
+        "GUID:18d18f811ba286c49814567a3cfba688",
+        "GUID:5144c6d6404c34f70b2d82609133a096",
+        "GUID:aed755414110e58448b02f5a77e42d6c"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [
+        {
+            "name": "com.unity.visualscripting",
+            "expression": "1.9",
+            "define": "HAVE_VISUAL_SCRIPTING"
+        }
+    ],
+    "noEngineReferences": false
+}
