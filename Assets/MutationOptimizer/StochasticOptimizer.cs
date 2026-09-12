@@ -56,6 +56,10 @@ public class StochasticOptimizer : MonoBehaviour
 	private bool fixedViewOrthographic;
 	private float fixedViewOrthographicSize;
 	private float fixedViewFieldOfView;
+	private Texture targetAlbedoTexture;
+	private RenderTexture targetAlbedoCopy;
+	private Texture2D mseReadbackOptimized;
+	private Texture2D mseReadbackTarget;
 
 	// Compute kernels
 	private int kernelReset;
@@ -73,6 +77,12 @@ public class StochasticOptimizer : MonoBehaviour
 	public GameObject target3DMesh;
 	public int primitiveCount;
 	public Vector2 randomViewZoomRange = Vector2.one;
+	public InitialMeshType initialMeshType = InitialMeshType.Icosphere;
+	public int icosphereSubdivision = 4;
+	public int torusMajorSegments = 160;
+	public int torusMinorSegments = 64;
+	public float torusMajorRadius = 0.75f;
+	public float torusMinorRadius = 0.35f;
 
 	public bool reset = false;
 	public bool pause = false;
@@ -84,11 +94,14 @@ public class StochasticOptimizer : MonoBehaviour
 
 	public Optimizer optimizer = Optimizer.Adam;
 	public LossMode lossMode = LossMode.L2;
+	public ExperimentMode experimentMode = ExperimentMode.GeometryAndTexture;
 	public ViewMode viewMode = ViewMode.RandomMultiView;
 	public RegularizationMode regularizationMode = RegularizationMode.GradientPrecondition;
 	public bool doAlphaLoss = true;
 	public int viewsPerOptimStep = 1;
 	public bool optimizeColorsSeparately = false;
+	public int targetLODLevel = 0;
+	public int textureMSEUpdateInterval = 50;
 
 	[Range(0.0f, 1.0f)] public float beta1 = 0.9f;
 	[Range(0.0f, 1.0f)] public float beta2 = 0.999f;
@@ -99,9 +112,13 @@ public class StochasticOptimizer : MonoBehaviour
 
 	public float millisecondsPerOptimStep = 0.0f;
 	public float totalElapsedSeconds = 0.0f;
+	public float textureMSE = 0.0f;
+	public float texturePSNR = 0.0f;
 
 	public bool visualizeLoss;
 	private float chamfer;
+	private float hausdorff;
+	private string chamferLogPath;
 	private Vector3[] verticesDst;
 	private KDTree verticesDstKDTree;
 	private KDQuery query;
@@ -130,7 +147,10 @@ public class StochasticOptimizer : MonoBehaviour
 		kernelGradientDescent = stochasticOptimizerCS.FindKernel("GradientDescent");
 		
 		if (visualizeLoss)
+		{
 			DebugGUI.SetGraphProperties("chamfer", "chamfer", 0, 0.5f, 1, Color.red, true);
+			DebugGUI.SetGraphProperties("hausdorff", "hausdorff", 0, 0.5f, 1, Color.blue, true);
+		}
 		
 		verticesDst = target3DMesh.GetComponentInChildren<MeshFilter>().sharedMesh.vertices;
 		for (int i = 0; i < verticesDst.Length; i++)
@@ -152,11 +172,19 @@ public class StochasticOptimizer : MonoBehaviour
 		if (Input.GetKeyDown(KeyCode.F2)) displayMode = DisplayMode.Target;
 
 		// First init
-		if (!step2 && currentOptimStep == 0)
+		if (currentOptimStep == 0)
 		{
 			ResetEverything();
 			totalElapsedSeconds = 0.0f;
 			systemTimer.Restart();
+		}
+
+		if (experimentMode == ExperimentMode.TextureReconstructionTest)
+		{
+			TextureOptimizationUpdate();
+			DisplayModeUpdate();
+			lastStep2 = step2;
+			return;
 		}
 
 		// Step1: Optimization Loop
@@ -225,7 +253,6 @@ public class StochasticOptimizer : MonoBehaviour
 			// Next camera position
 			currentViewPoint += 1;
 		}
-
 
 		// Apply accumulated gradient for this optim step
 		DoGradientDescent();
@@ -304,7 +331,10 @@ public class StochasticOptimizer : MonoBehaviour
 			// Set up new view point
 			textureOptimizer.textureOptimizerCS.SetInt("_CurrentView", currentViewPoint);
 			SetupOptimizationCameraView();
-			cameraOptim.Render();
+			if (experimentMode == ExperimentMode.TextureReconstructionTest)
+				RenderTextureReconstructionTarget();
+			else
+				cameraOptim.Render();
 			
 			// Minus Epsilon
 			textureOptimizer.textureOptimizerCS.SetFloat("_IsAntitheticMutation", 1.0f);
@@ -328,6 +358,9 @@ public class StochasticOptimizer : MonoBehaviour
 		textureOptimizer.ResetOptimizationStep();
 
 		// Metrics
+		if (experimentMode == ExperimentMode.TextureReconstructionTest && textureMSEUpdateInterval > 0 && currentOptimStep % textureMSEUpdateInterval == 0)
+			ComputeTextureMSE(currentOptimStep);
+
 		currentOptimStep += 1;
 		millisecondsPerOptimStep = (float)systemTimer.Elapsed.TotalMilliseconds;
 		totalElapsedSeconds += (float)systemTimer.Elapsed.TotalMilliseconds / 1000.0f;
@@ -377,6 +410,9 @@ public class StochasticOptimizer : MonoBehaviour
 	void ReleaseEverything()
 	{
 		SafeDestroy(ref rasterMaterial);
+		SafeRelease(ref targetAlbedoCopy);
+		SafeDestroy(ref mseReadbackOptimized);
+		SafeDestroy(ref mseReadbackTarget);
 		SafeRelease(ref primitiveBuffer);
 		SafeRelease(ref indexBuffer);
 		SafeRelease(ref AdjacencyBuffer);
@@ -573,11 +609,65 @@ public class StochasticOptimizer : MonoBehaviour
 		stochasticOptimizerCS.SetBuffer(kernelRandomPerturbation, "_PrimitiveBufferMutated", primitiveBufferMutated);
 		DispatchCompute1D(stochasticOptimizerCS, kernelRandomPerturbation, primitiveBuffer.count, 256);
 	}
+
+	public void RenderTextureReconstructionTarget()
+	{
+		textureOptimizer.RenderTexturedMesh(cameraOptim, targetFrameBuffer, m, targetAlbedoCopy != null ? targetAlbedoCopy : targetAlbedoTexture);
+	}
 	
 	
 	
 	
 	// ======================= EVALUATION =======================
+	private bool EnsureChamferLog()
+	{
+		if (!visualizeLoss)
+			return false;
+
+		if (!string.IsNullOrEmpty(chamferLogPath))
+			return true;
+
+		try
+		{
+			string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+			string logDirectory = Path.Combine(projectRoot, "Logs", "Chamfer");
+			Directory.CreateDirectory(logDirectory);
+
+			string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
+			chamferLogPath = Path.Combine(logDirectory, "chamfer_" + timestamp + ".txt");
+			File.WriteAllText(chamferLogPath, "step\tchamfer\thausdorff\telapsed_seconds" + Environment.NewLine);
+			Debug.Log("Chamfer log: " + chamferLogPath);
+			return true;
+		}
+		catch (Exception e)
+		{
+			chamferLogPath = null;
+			Debug.LogWarning("Failed to create chamfer log: " + e.Message);
+			return false;
+		}
+	}
+
+	private void AppendChamferLog()
+	{
+		if (!EnsureChamferLog())
+			return;
+
+		try
+		{
+			string line =
+				currentOptimStep + "\t" +
+				chamfer.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\t" +
+				hausdorff.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\t" +
+				totalElapsedSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+				Environment.NewLine;
+			File.AppendAllText(chamferLogPath, line);
+		}
+		catch (Exception e)
+		{
+			Debug.LogWarning("Failed to append chamfer log: " + e.Message);
+		}
+	}
+
 	public void ComputeLoss()
 	{
 		Vector3[] verticesSrc = new Vector3[vertexCount];
@@ -587,6 +677,8 @@ public class StochasticOptimizer : MonoBehaviour
 		// Compute distance
 		double sumSrcToDst = 0.0;
 		double sumDstToSrc = 0.0;
+		float maxSrcToDst = 0.0f;
+		float maxDstToSrc = 0.0f;
 
 		// ----- SRC -> DST -----
 		for (int i = 0; i < verticesSrc.Length; i++)
@@ -600,6 +692,7 @@ public class StochasticOptimizer : MonoBehaviour
 			float dist = Mathf.Sqrt(minDistSqr);
 
 			sumSrcToDst += dist;
+			maxSrcToDst = Mathf.Max(maxSrcToDst, dist);
 		}
 
 		// ----- DST -> SRC -----
@@ -614,15 +707,19 @@ public class StochasticOptimizer : MonoBehaviour
 			float dist = Mathf.Sqrt(minDistSqr);
 
 			sumDstToSrc += dist;
+			maxDstToSrc = Mathf.Max(maxDstToSrc, dist);
 		}
 		
 		chamfer = (float)(
 			sumSrcToDst / verticesSrc.Length +
 			sumDstToSrc / verticesDst.Length
 		);
+		hausdorff = Mathf.Max(maxSrcToDst, maxDstToSrc);
 		
 		DebugGUI.Graph("chamfer", chamfer);
-		Debug.Log("step: " + currentOptimStep + " chamfer: " + chamfer);
+		DebugGUI.Graph("hausdorff", hausdorff);
+		Debug.Log("step: " + currentOptimStep + " chamfer: " + chamfer + " hausdorff: " + hausdorff);
+		AppendChamferLog();
 	}
 
 
@@ -651,6 +748,142 @@ public class StochasticOptimizer : MonoBehaviour
 		computeShader.SetFloat("_OptimizerBeta2", beta2);
 		computeShader.SetFloat("_DoAlphaLoss", doAlphaLoss ? 1.0f : 0.0f);
 		computeShader.SetFloat("_LearningRateColor", learningRateColor);
+	}
+
+	public void InitTextureReconstructionTest()
+	{
+		ReleaseOptimBuffers();
+		SafeRelease(ref targetAlbedoCopy);
+		SafeDestroy(ref mseReadbackOptimized);
+		SafeDestroy(ref mseReadbackTarget);
+
+		MeshRenderer selectedRenderer;
+		Mesh selectedMesh = GetTargetLODMesh(out selectedRenderer);
+		m = BuildWorldSpaceTextureTestMesh(selectedMesh, selectedRenderer.transform);
+		targetAlbedoTexture = GetMainTexture(selectedRenderer.sharedMaterial);
+		if (targetAlbedoTexture == null)
+		{
+			Debug.LogWarning("Texture reconstruction test could not find _BaseMap or _MainTex on target material. Falling back to white texture.");
+			targetAlbedoTexture = Texture2D.whiteTexture;
+		}
+
+		targetAlbedoCopy = new RenderTexture(targetAlbedoTexture.width, targetAlbedoTexture.height, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+		targetAlbedoCopy.enableRandomWrite = false;
+		targetAlbedoCopy.filterMode = FilterMode.Point;
+		targetAlbedoCopy.Create();
+		Graphics.Blit(targetAlbedoTexture, targetAlbedoCopy);
+
+		textureOptimizer = new TextureOptimizer(targetResolution, targetAlbedoTexture);
+		renderedFrameMutatedMinus = new RenderTexture(targetResolution.x, targetResolution.y, 32, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+		renderedFrameMutatedMinus.enableRandomWrite = true;
+		renderedFrameMutatedPlus = new RenderTexture(targetResolution.x, targetResolution.y, 32, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+		renderedFrameMutatedPlus.enableRandomWrite = true;
+		targetFrameBuffer = new RenderTexture(targetResolution.x, targetResolution.y, 32, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+
+		step2 = true;
+		lastStep2 = true;
+		ComputeTextureMSE();
+	}
+
+	public Mesh GetTargetLODMesh(out MeshRenderer selectedRenderer)
+	{
+		LODGroup lodGroup = target3DMesh.GetComponentInChildren<LODGroup>();
+		if (lodGroup != null)
+		{
+			LOD[] lods = lodGroup.GetLODs();
+			int lodIndex = Mathf.Clamp(targetLODLevel, 0, lods.Length - 1);
+			foreach (Renderer renderer in lods[lodIndex].renderers)
+			{
+				MeshFilter meshFilter = renderer.GetComponent<MeshFilter>();
+				if (meshFilter != null && meshFilter.sharedMesh != null)
+				{
+					selectedRenderer = renderer as MeshRenderer;
+					if (selectedRenderer != null)
+						return meshFilter.sharedMesh;
+				}
+			}
+		}
+
+		MeshFilter fallbackMeshFilter = target3DMesh.GetComponentInChildren<MeshFilter>();
+		if (fallbackMeshFilter == null || fallbackMeshFilter.sharedMesh == null)
+			throw new InvalidOperationException("Texture reconstruction test requires target3DMesh to contain a MeshFilter with a mesh.");
+
+		selectedRenderer = fallbackMeshFilter.GetComponent<MeshRenderer>();
+		if (selectedRenderer == null)
+			throw new InvalidOperationException("Texture reconstruction test requires the selected LOD mesh to have a MeshRenderer.");
+
+		return fallbackMeshFilter.sharedMesh;
+	}
+
+	public Mesh BuildWorldSpaceTextureTestMesh(Mesh sourceMesh, Transform sourceTransform)
+	{
+		Mesh result = Instantiate(sourceMesh);
+		Vector3[] vertices = result.vertices;
+		for (int i = 0; i < vertices.Length; i++)
+			vertices[i] = sourceTransform.TransformPoint(vertices[i]);
+		result.vertices = vertices;
+
+		if (result.uv == null || result.uv.Length != result.vertexCount)
+			Debug.LogWarning("Texture reconstruction test mesh has no valid uv0. UV rendering will not be meaningful.");
+		else
+			result.uv2 = result.uv;
+
+		result.RecalculateBounds();
+		return result;
+	}
+
+	public Texture GetMainTexture(Material material)
+	{
+		if (material == null)
+			return null;
+
+		if (material.HasProperty("_BaseMap") && material.GetTexture("_BaseMap") != null)
+			return material.GetTexture("_BaseMap");
+
+		if (material.HasProperty("_MainTex") && material.GetTexture("_MainTex") != null)
+			return material.GetTexture("_MainTex");
+
+		return null;
+	}
+
+	public void ComputeTextureMSE(int step = 0)
+	{
+		if (textureOptimizer == null || textureOptimizer.albedoMap == null || targetAlbedoCopy == null)
+			return;
+
+		int width = textureOptimizer.albedoMap.width;
+		int height = textureOptimizer.albedoMap.height;
+		if (mseReadbackOptimized == null || mseReadbackOptimized.width != width || mseReadbackOptimized.height != height)
+		{
+			SafeDestroy(ref mseReadbackOptimized);
+			SafeDestroy(ref mseReadbackTarget);
+			mseReadbackOptimized = new Texture2D(width, height, TextureFormat.RGBA32, false, true);
+			mseReadbackTarget = new Texture2D(width, height, TextureFormat.RGBA32, false, true);
+		}
+
+		RenderTexture previousActive = RenderTexture.active;
+		RenderTexture.active = textureOptimizer.albedoMap;
+		mseReadbackOptimized.ReadPixels(new Rect(0, 0, width, height), 0, 0);
+		mseReadbackOptimized.Apply(false);
+		RenderTexture.active = targetAlbedoCopy;
+		mseReadbackTarget.ReadPixels(new Rect(0, 0, width, height), 0, 0);
+		mseReadbackTarget.Apply(false);
+		RenderTexture.active = previousActive;
+
+		Color32[] optimizedPixels = mseReadbackOptimized.GetPixels32();
+		Color32[] targetPixels = mseReadbackTarget.GetPixels32();
+		double sumSquaredError = 0.0;
+		for (int i = 0; i < optimizedPixels.Length; i++)
+		{
+			float dr = (optimizedPixels[i].r - targetPixels[i].r) / 255.0f;
+			float dg = (optimizedPixels[i].g - targetPixels[i].g) / 255.0f;
+			float db = (optimizedPixels[i].b - targetPixels[i].b) / 255.0f;
+			sumSquaredError += dr * dr + dg * dg + db * db;
+		}
+
+		textureMSE = (float)(sumSquaredError / (optimizedPixels.Length * 3.0));
+		texturePSNR = textureMSE > 0.0f ? 10.0f * Mathf.Log10(1.0f / textureMSE) : float.PositiveInfinity;
+		Debug.Log("step: " + step + " texture mse: " + textureMSE + " psnr: " + texturePSNR);
 	}
 
 	public void RandomizeCameraView()
@@ -706,6 +939,22 @@ public class StochasticOptimizer : MonoBehaviour
 		for (int i = 0; i < allRenderers.Length; i++)
 			if (allRenderers[i].gameObject.activeInHierarchy == true)
 				mesh3DSceneBounds.Encapsulate(allRenderers[i].bounds);
+
+		if (experimentMode == ExperimentMode.TextureReconstructionTest)
+		{
+			InitTextureReconstructionTest();
+			cameraDisplay.GetComponent<OrbitCamera>().target = mesh3DSceneBounds;
+			cameraOptim.enabled = false;
+			cameraOptim.targetTexture = targetFrameBuffer;
+			cameraDisplay.orthographic = false;
+
+			currentOptimStep = 0;
+			currentViewPoint = 0;
+			fixedViewInitialized = false;
+			totalElapsedSeconds = 0.0f;
+			systemTimer.Restart();
+			return;
+		}
 
 		// Primitive buffer
 		// InitPrimitiveBuffer();
@@ -817,6 +1066,18 @@ public class StochasticOptimizer : MonoBehaviour
 		material = null;
 	}
 
+	public static void SafeDestroy(ref Texture2D texture)
+	{
+		if (texture == null)
+			return;
+
+		if (Application.isPlaying)
+			Destroy(texture);
+		else
+			DestroyImmediate(texture);
+		texture = null;
+	}
+
 
 
 
@@ -831,11 +1092,25 @@ public class StochasticOptimizer : MonoBehaviour
 		//int[] triangles = init3DMesh.GetComponent<MeshFilter>().sharedMesh.triangles;
 		Vector3[] vertices;
 
-		IcosphereGenerator.Generate(
-			subdivision: 4,
-			out vertices,
-			out triangles
+		if (initialMeshType == InitialMeshType.Torus)
+		{
+			IcosphereGenerator.GenerateTorus(
+				majorSegments: torusMajorSegments,
+				minorSegments: torusMinorSegments,
+				majorRadius: torusMajorRadius,
+				minorRadius: torusMinorRadius,
+				out vertices,
+				out triangles
 			);
+		}
+		else
+		{
+			IcosphereGenerator.Generate(
+				subdivision: icosphereSubdivision,
+				out vertices,
+				out triangles
+			);
+		}
 
 		triangleCount = triangles.Length / 3;
 		indexBuffer = new ComputeBuffer(triangles.Length, sizeof(int));
@@ -875,8 +1150,8 @@ public class StochasticOptimizer : MonoBehaviour
 
 		for (int i = vertexCount; i < primitiveCount; i++)
 		{
-			//Color initColor = UnityEngine.Random.ColorHSV(0, 1, 0, 1);
-			Color initColor = Color.white;
+			Color initColor = UnityEngine.Random.ColorHSV(0, 1, 0, 1);
+			//Color initColor = Color.white;
 			data[i] = new float3(initColor.r, initColor.g, initColor.b);
 		}
 		
@@ -897,6 +1172,18 @@ public class StochasticOptimizer : MonoBehaviour
 	{
 		L1,
 		L2
+	}
+
+	public enum ExperimentMode
+	{
+		GeometryAndTexture,
+		TextureReconstructionTest
+	}
+
+	public enum InitialMeshType
+	{
+		Icosphere,
+		Torus
 	}
 
 	public enum ViewMode

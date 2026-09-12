@@ -27,12 +27,14 @@ public class TextureOptimizer
 
     public int texelCounts;
     public Vector2Int targetResolution;
+    private Texture referenceTexture;
     
     private Color UVClearColor = new Color(4294967295, 0, 0, 0);
     
-    public TextureOptimizer(Vector2Int targetResolution)
+    public TextureOptimizer(Vector2Int targetResolution, Texture referenceTexture = null)
     {
         this.targetResolution = targetResolution;
+        this.referenceTexture = referenceTexture;
         
         // Init rendering material
         rasterMaterial = new Material(Shader.Find("Custom/TexturedMeshRasterizer"));
@@ -114,13 +116,28 @@ public class TextureOptimizer
         Graphics.DrawMeshNow(m, Matrix4x4.identity);
     }
 
+    public void RenderTexturedMesh(Camera cameraToUse, RenderTexture renderTargetToUse, Mesh m, Texture texture)
+    {
+        rasterMaterial.SetTexture("_MainTex", texture);
+        
+        Matrix4x4 cameraVP = GL.GetGPUProjectionMatrix(cameraToUse.projectionMatrix, true) * cameraToUse.worldToCameraMatrix;
+        rasterMaterial.SetMatrix("_CameraMatrixVP", cameraVP);
+
+        Graphics.SetRenderTarget(renderTargetToUse.colorBuffer, renderTargetToUse.depthBuffer);
+        GL.Clear(true, true, Color.clear, 1.0f);
+        rasterMaterial.SetPass(0);
+        Graphics.DrawMeshNow(m, Matrix4x4.identity);
+    }
+
     public void InitResources()
     {
         ReleaseResources();
         
         // Init albedoMap
         Texture2D white = Resources.Load<Texture2D>("1024");
-        albedoMap = new RenderTexture(white.width, white.height, 0, RenderTextureFormat.ARGB32);
+        int textureWidth = referenceTexture != null ? referenceTexture.width : white.width;
+        int textureHeight = referenceTexture != null ? referenceTexture.height : white.height;
+        albedoMap = new RenderTexture(textureWidth, textureHeight, 0, RenderTextureFormat.ARGB32);
         albedoMap.enableRandomWrite = true;
         albedoMap.autoGenerateMips = true;
         albedoMap.filterMode = FilterMode.Point;
@@ -128,7 +145,7 @@ public class TextureOptimizer
         Graphics.Blit(white, albedoMap);
         texelCounts = albedoMap.width * albedoMap.height;
         
-        albedoMapMutated = new RenderTexture(white.width, white.height, 0, RenderTextureFormat.ARGB32);
+        albedoMapMutated = new RenderTexture(textureWidth, textureHeight, 0, RenderTextureFormat.ARGB32);
         albedoMapMutated.enableRandomWrite = true;
         albedoMapMutated.autoGenerateMips = true;
         albedoMapMutated.filterMode = FilterMode.Point;

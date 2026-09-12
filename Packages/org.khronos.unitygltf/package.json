@@ -1,0 +1,30 @@
+{
+  "name": "org.khronos.unitygltf",
+  "displayName": "UnityGLTF",
+  "version": "2.19.5",
+  "unity": "2021.3",
+  "description": "Import and export glTF 2.0 assets, both in the editor and at runtime. Excellent support for animations, materials, extensions. Can be extended with plugins for both import and export use cases.",
+  "repository": {
+    "url": "https://github.com/KhronosGroup/UnityGLTF.git"
+  },
+  "keywords": [
+    "gltf",
+    "khronos",
+    "runtime",
+    "loader",
+    "import",
+    "export"
+  ],
+  "author": "Khronos Group",
+  "dependencies": {
+    "com.unity.nuget.newtonsoft-json": "2.0.0",
+    "com.unity.modules.audio": "1.0.0",
+    "com.unity.modules.imageconversion": "1.0.0",
+    "com.unity.modules.particlesystem": "1.0.0",
+    "com.unity.shadergraph": "10.0.0",
+    "com.unity.mathematics": "1.0.0",
+    "com.unity.collections": "1.0.0"
+  },
+  "samples": [],
+  "_fingerprint": "72f1860d24d3ebc67c7ee4960c418c915f9b718b"
+}
