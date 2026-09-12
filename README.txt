@@ -1,25 +1,17 @@
-This sample code is a Unity project that allows running the triangle soup => pineapple optimization example shown throughout our I3D 2024 presentation. Open the "OptimizerScene" scene to try it out. This Unity project should work with basically any Unity version, no need to download a specific one.
+# SGE
 
+## 中文说明
 
+这个仓库是在原始论文代码仓库基础上的二次开发版本。原始代码主要支持 triangle soup 形式的几何表示；在此基础上，本仓库扩展了对 mesh 和 texture 的支持，并尝试优化几何重建质量。
 
-CONTROLS
-- The target 3D model to optimize can be swapped out for another with the "target3Dmesh" variable. Using the "init primitives on mesh surface", the triangle soup will be initialized randomly along the target's surface, otherwise they are initialized randomly within the AABB of the target mesh.
+需要说明的是，目前的重建效果还不理想，也没有达到原始论文中展示的效果。主要原因是原始代码并没有完整展示论文中高质量结果的具体实现路径，因此这里的实现更多是基于论文、原始仓库和实验理解进行的复现与扩展。
 
-- Press F1/F2 to switch between viewing the optimization or the target.
+目前这个仓库仅作为学术研究和个人学习用途。代码质量还比较差，工程结构、可维护性和稳定性都需要继续改进。后续计划使用 AI 辅助对代码进行重构，继续提升重建质量，尝试 scale up 到更大规模的场景，并探索更多可微渲染相关课题。
 
-- Press P to pause. While paused, press Space to perform one individual optimization step.
+## English
 
-- Disable the "Separate Free View Camera" option to see the actual optimization points of views rendered instead of the orbit camera.
+This repository is a secondary development version based on the original paper repository. The original code mainly supports geometry represented as triangle soup. On top of that, this repository adds support for mesh and texture, and also attempts to improve the quality of geometry reconstruction.
 
-- The "optimize colors separately" will make it so that each optimization step is performed twice, once only mutating the positions, once only mutating the colors. This trick allows better optimization convergence in this example by separating the gradient estimation of positions and colors.
+Please note that the current reconstruction quality is still limited and does not reach the results shown in the original paper. The main reason is that the original code does not fully demonstrate how the high-quality results in the paper were achieved, so this implementation is more of a reproduction and extension based on the paper, the original repository, and experimental understanding.
 
-- The "Primitive Resampling" is a trick used to make this use case with a soup of triangles much more efficient, by re-using invalid triangles to subdive valid ones in two using longest edge bisection. Without this technique, triangles falling outside the surface of the target mesh will simply become as small as they can without ever being useful. With this technique, they can instead be retargetted towards improving the quality of the surface's reconstruction. Triangles are deemed invalid when their area is under the specified threshold, or when they haven't been seen by any point of view for at least the specific amount of optimization steps.
-
-
-
-IMPLEMENTATION DETAILS
-- Note that, as described in the paper, we choose to use here an antithetic gradient estimator: for each random perturbation of the entire scene ("plus epsilon"), we also do the opposite perturbation ("minus epsilon"), and estimate the loss reduction based on the difference between these two results, instead of comparing between "perturbed" and "non-perturbed" results.
-
-- All the compute shaders required by the method are in the "StochasticOptimizer.compute" file. Note that in the RandomPerturbation kernel, for simplicity, we use the learning rate as a perturbation amplitude parameter but should be a separate one, ideally the smallest possible perturbation that is guaranteed to produce a change in the output.
-
-- The GradientEstimation compute shader is split in two kernels. "GradientEstimation" first runs over all the pixels in the images to evaluate per-pixel loss reductions. It accumulates this into a temporary buffer with one value per triangle (quantized in integer since float atomics are not yet available in Unity). "GradientEstimationPost" then runs with one thread per triangle to get this value and accumulates "mutation*loss_reduction" individually for each parameter of the triangle. This allows performing much less work during the per-pixel kernel, offloading the work that can be to a per-primitive kernel instead.
+At the moment, this repository is intended only for academic research and personal learning. The code quality is still poor, and the engineering structure, maintainability, and stability all need further improvement. In the future, I plan to use AI assistance to refactor the code, improve reconstruction quality, scale up to larger scenes, and explore more topics related to differentiable rendering.
